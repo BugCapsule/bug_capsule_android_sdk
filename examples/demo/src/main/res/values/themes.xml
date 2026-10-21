@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.Shop" parent="Theme.AppCompat.Light.DarkActionBar" />
+</resources>

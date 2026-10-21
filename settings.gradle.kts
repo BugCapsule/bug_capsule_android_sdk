@@ -1,0 +1,25 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "bugcapsule-android-sdk"
+
+include(":bugcapsule-android")
+include(":bugcapsule-okhttp")
+include(":bugcapsule-navigation")
+include(":bugcapsule-compose")
+include(":bugcapsule-android-replay")
+include(":demo")
+project(":demo").projectDir = file("examples/demo")

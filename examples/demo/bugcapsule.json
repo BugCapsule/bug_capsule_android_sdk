@@ -1,0 +1,15 @@
+{
+  "runtime": "android",
+  "android": {
+    "gradleDir": "../..",
+    "module": "demo",
+    "variant": "debug",
+    "applicationId": "dev.bugcapsule.demo",
+    "testApplicationId": "dev.bugcapsule.demo.test",
+    "runner": "dev.bugcapsule.android.replay.BugCapsuleReplayRunner",
+    "testClass": "dev.bugcapsule.android.replay.BugCapsuleReplayTest",
+    "avd": "Pixel_6_2",
+    "gradleArgs": []
+  },
+  "timeouts": {"buildSeconds": 1200}
+}
