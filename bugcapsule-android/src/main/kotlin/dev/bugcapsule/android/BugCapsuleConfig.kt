@@ -1,6 +1,10 @@
 package dev.bugcapsule.android
 
 import dev.bugcapsule.android.core.CaptureMode
+import dev.bugcapsule.android.monitoring.BeforeBreadcrumb
+import dev.bugcapsule.android.monitoring.BeforeSend
+import dev.bugcapsule.android.monitoring.BeforeSendTransaction
+import dev.bugcapsule.android.monitoring.TracesSampler
 import java.util.regex.Pattern
 
 /** Where capsules are uploaded and remote capture config comes from. */
@@ -86,6 +90,77 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val labels: Map<String, String> = b.labels.toMap()
     val maxSavedCaptures: Int = b.maxSavedCaptures
 
+    // ------------------------------------------------- monitoring (monitoring-v1 §11)
+
+    /** False turns off everything monitoring adds (errors, sessions, tracing, feedback envelopes). */
+    val monitoring: Boolean = b.monitoring
+
+    /** Null: `<app id>@<version>+<build>`. */
+    val release: String? = b.release
+
+    /** Null: `production`, `qa` or `development` from the capture mode. */
+    val environment: String? = b.environment
+    val dist: String? = b.dist
+
+    /** Share of non-fatal error events sent (remote `errorSampleRate` overrides it). */
+    val errorSampleRate: Double = b.errorSampleRate
+
+    /** Share of traces sampled when there is no [tracesSampler] (remote `tracesSampleRate` overrides it); null = 0. */
+    val tracesSampleRate: Double? = b.tracesSampleRate
+    val tracesSampler: TracesSampler? = b.tracesSampler
+
+    /** URLs (substring, or `/regex/`) that receive `traceparent` / `baggage`; none by default. */
+    val tracePropagationTargets: List<String> = b.tracePropagationTargets.toList()
+    val enableAutoSessionTracking: Boolean = b.enableAutoSessionTracking
+
+    /** A session ends after this long in the background. */
+    val sessionTimeoutMs: Long = b.sessionTimeoutMs
+    val maxBreadcrumbs: Int = b.maxBreadcrumbs
+    val beforeSend: BeforeSend? = b.beforeSend
+    val beforeSendTransaction: BeforeSendTransaction? = b.beforeSendTransaction
+    val beforeBreadcrumb: BeforeBreadcrumb? = b.beforeBreadcrumb
+
+    /** Package prefixes of in-app frames; empty: the app id. */
+    val inAppIncludes: List<String> = b.inAppIncludes.toList()
+    val inAppExcludes: List<String> = b.inAppExcludes.toList()
+
+    /** Adds the calling thread's stack to `captureMessage` events. */
+    val attachStacktrace: Boolean = b.attachStacktrace
+
+    /** True: `user.ipAddress` is `{{auto}}` (the server fills it, kept only with `storeIpAddresses`). */
+    val sendDefaultPii: Boolean = b.sendDefaultPii
+    val enableAnrTracking: Boolean = b.enableAnrTracking
+    val anrTimeoutMs: Long = b.anrTimeoutMs
+
+    /** Needs the `bugcapsule-ndk` artifact; ignored without it. */
+    val enableNativeCrashHandling: Boolean = b.enableNativeCrashHandling
+
+    /** `ui.action.click` transactions for semantic actions ([BugCapsule.action], Compose/Views helpers). */
+    val enableUserInteractionTracing: Boolean = b.enableUserInteractionTracing
+    val enableAppStartTracking: Boolean = b.enableAppStartTracking
+
+    /** `ui.load` transactions for activities (and spans for fragments). */
+    val enableActivityTracing: Boolean = b.enableActivityTracing
+
+    /** Screen transactions wait for [BugCapsule.reportFullyDrawn] (`ui.load.full_display`, TTFD). */
+    val enableTimeToFullDisplayTracing: Boolean = b.enableTimeToFullDisplayTracing
+    val enableFramesTracking: Boolean = b.enableFramesTracking
+
+    /** Idle time after which a screen / interaction transaction finishes when no span is running. */
+    val idleTransactionTimeoutMs: Long = b.idleTransactionTimeoutMs
+
+    /** Null: true in [CaptureMode.QA]. Submitting feedback also writes a capsule, linked by `capsuleId`. */
+    val captureCapsuleWithFeedback: Boolean? = b.captureCapsuleWithFeedback
+
+    /** Shaking the device opens the feedback dialog on the resumed activity. */
+    val enableShakeToReport: Boolean = b.enableShakeToReport
+
+    /** Null: read from `assets/bugcapsule-debug-meta.properties` (written by the Gradle plugin). */
+    val proguardUuid: String? = b.proguardUuid
+
+    /** Bounds of the monitoring envelope outbox (default 30 envelopes / 5 MiB / 7 days). */
+    val envelopeOutboxLimits: OutboxLimits = b.envelopeOutboxLimits
+
     fun toBuilder(): Builder = Builder(this)
 
     class Builder() {
@@ -118,6 +193,37 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var ignoreError: ErrorFilter? = null
         internal val labels = LinkedHashMap<String, String>()
         internal var maxSavedCaptures = 20
+        internal var monitoring = true
+        internal var release: String? = null
+        internal var environment: String? = null
+        internal var dist: String? = null
+        internal var errorSampleRate = 1.0
+        internal var tracesSampleRate: Double? = null
+        internal var tracesSampler: TracesSampler? = null
+        internal val tracePropagationTargets = ArrayList<String>()
+        internal var enableAutoSessionTracking = true
+        internal var sessionTimeoutMs = 30_000L
+        internal var maxBreadcrumbs = 100
+        internal var beforeSend: BeforeSend? = null
+        internal var beforeSendTransaction: BeforeSendTransaction? = null
+        internal var beforeBreadcrumb: BeforeBreadcrumb? = null
+        internal val inAppIncludes = ArrayList<String>()
+        internal val inAppExcludes = ArrayList<String>()
+        internal var attachStacktrace = true
+        internal var sendDefaultPii = false
+        internal var enableAnrTracking = true
+        internal var anrTimeoutMs = 5_000L
+        internal var enableNativeCrashHandling = true
+        internal var enableUserInteractionTracing = false
+        internal var enableAppStartTracking = true
+        internal var enableActivityTracing = true
+        internal var enableTimeToFullDisplayTracing = false
+        internal var enableFramesTracking = true
+        internal var idleTransactionTimeoutMs = 3_000L
+        internal var captureCapsuleWithFeedback: Boolean? = null
+        internal var enableShakeToReport = false
+        internal var proguardUuid: String? = null
+        internal var envelopeOutboxLimits = OutboxLimits(maxCount = 30, maxBytes = 5L * 1024 * 1024)
 
         internal constructor(c: BugCapsuleConfig) : this() {
             appVersion = c.appVersion; appBuild = c.appBuild; appId = c.appId; appName = c.appName
@@ -130,6 +236,18 @@ class BugCapsuleConfig private constructor(b: Builder) {
             redactPatterns += c.redactPatterns; beforeRecord = c.beforeRecord; beforeCheckpoint = c.beforeCheckpoint
             outboxLimits = c.outboxLimits; maxStaleConfigMs = c.maxStaleConfigMs; ignoreError = c.ignoreError
             labels += c.labels; maxSavedCaptures = c.maxSavedCaptures
+            monitoring = c.monitoring; release = c.release; environment = c.environment; dist = c.dist
+            errorSampleRate = c.errorSampleRate; tracesSampleRate = c.tracesSampleRate; tracesSampler = c.tracesSampler
+            tracePropagationTargets += c.tracePropagationTargets; enableAutoSessionTracking = c.enableAutoSessionTracking
+            sessionTimeoutMs = c.sessionTimeoutMs; maxBreadcrumbs = c.maxBreadcrumbs; beforeSend = c.beforeSend
+            beforeSendTransaction = c.beforeSendTransaction; beforeBreadcrumb = c.beforeBreadcrumb
+            inAppIncludes += c.inAppIncludes; inAppExcludes += c.inAppExcludes; attachStacktrace = c.attachStacktrace
+            sendDefaultPii = c.sendDefaultPii; enableAnrTracking = c.enableAnrTracking; anrTimeoutMs = c.anrTimeoutMs
+            enableNativeCrashHandling = c.enableNativeCrashHandling; enableUserInteractionTracing = c.enableUserInteractionTracing
+            enableAppStartTracking = c.enableAppStartTracking; enableActivityTracing = c.enableActivityTracing
+            enableTimeToFullDisplayTracing = c.enableTimeToFullDisplayTracing; enableFramesTracking = c.enableFramesTracking
+            idleTransactionTimeoutMs = c.idleTransactionTimeoutMs; captureCapsuleWithFeedback = c.captureCapsuleWithFeedback
+            enableShakeToReport = c.enableShakeToReport; proguardUuid = c.proguardUuid; envelopeOutboxLimits = c.envelopeOutboxLimits
         }
 
         fun appVersion(v: String?) = apply { appVersion = v }
@@ -163,6 +281,38 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun ignoreError(v: ErrorFilter?) = apply { ignoreError = v }
         fun label(key: String, value: String) = apply { labels[key] = value }
         fun maxSavedCaptures(v: Int) = apply { maxSavedCaptures = v }
+        fun monitoring(v: Boolean) = apply { monitoring = v }
+        fun release(v: String?) = apply { release = v?.takeIf { it.isNotBlank() } }
+        fun environment(v: String?) = apply { environment = v?.takeIf { it.isNotBlank() } }
+        fun dist(v: String?) = apply { dist = v?.takeIf { it.isNotBlank() } }
+        fun errorSampleRate(v: Double) = apply { errorSampleRate = v.coerceIn(0.0, 1.0) }
+        fun tracesSampleRate(v: Double?) = apply { tracesSampleRate = v?.coerceIn(0.0, 1.0) }
+        fun tracesSampler(v: TracesSampler?) = apply { tracesSampler = v }
+        fun tracePropagationTargets(vararg targets: String) = apply { tracePropagationTargets += targets }
+        fun tracePropagationTargets(targets: List<String>) = apply { tracePropagationTargets += targets }
+        fun enableAutoSessionTracking(v: Boolean) = apply { enableAutoSessionTracking = v }
+        fun sessionTimeoutMs(v: Long) = apply { sessionTimeoutMs = v.coerceAtLeast(0) }
+        fun maxBreadcrumbs(v: Int) = apply { maxBreadcrumbs = v.coerceIn(0, 100) }
+        fun beforeSend(v: BeforeSend?) = apply { beforeSend = v }
+        fun beforeSendTransaction(v: BeforeSendTransaction?) = apply { beforeSendTransaction = v }
+        fun beforeBreadcrumb(v: BeforeBreadcrumb?) = apply { beforeBreadcrumb = v }
+        fun inAppIncludes(vararg packages: String) = apply { inAppIncludes += packages }
+        fun inAppExcludes(vararg packages: String) = apply { inAppExcludes += packages }
+        fun attachStacktrace(v: Boolean) = apply { attachStacktrace = v }
+        fun sendDefaultPii(v: Boolean) = apply { sendDefaultPii = v }
+        fun enableAnrTracking(v: Boolean) = apply { enableAnrTracking = v }
+        fun anrTimeoutMs(v: Long) = apply { anrTimeoutMs = v.coerceAtLeast(1000) }
+        fun enableNativeCrashHandling(v: Boolean) = apply { enableNativeCrashHandling = v }
+        fun enableUserInteractionTracing(v: Boolean) = apply { enableUserInteractionTracing = v }
+        fun enableAppStartTracking(v: Boolean) = apply { enableAppStartTracking = v }
+        fun enableActivityTracing(v: Boolean) = apply { enableActivityTracing = v }
+        fun enableTimeToFullDisplayTracing(v: Boolean) = apply { enableTimeToFullDisplayTracing = v }
+        fun enableFramesTracking(v: Boolean) = apply { enableFramesTracking = v }
+        fun idleTransactionTimeoutMs(v: Long) = apply { idleTransactionTimeoutMs = v.coerceAtLeast(0) }
+        fun captureCapsuleWithFeedback(v: Boolean?) = apply { captureCapsuleWithFeedback = v }
+        fun enableShakeToReport(v: Boolean) = apply { enableShakeToReport = v }
+        fun proguardUuid(v: String?) = apply { proguardUuid = v?.takeIf { it.isNotBlank() } }
+        fun envelopeOutboxLimits(v: OutboxLimits) = apply { envelopeOutboxLimits = v }
         fun build() = BugCapsuleConfig(this)
     }
 

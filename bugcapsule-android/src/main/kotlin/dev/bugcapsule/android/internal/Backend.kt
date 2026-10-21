@@ -31,10 +31,18 @@ sealed class ConfigFetchResult {
 interface Transport {
     fun fetchConfig(): ConfigFetchResult
     fun upload(bytes: ByteArray): UploadResult
+
+    /**
+     * `POST /v1/envelope` with a gzip-compressed envelope (monitoring-v1 §1).
+     * Items the server rejects in a `200` are never retried, so `200` is
+     * [UploadStatus.UPLOADED] whatever it says about single items.
+     */
+    fun sendEnvelope(gzippedJson: ByteArray): UploadResult =
+        UploadResult(UploadStatus.REJECTED, message = "envelopes are not supported by this transport")
 }
 
 /**
- * `GET /v1/sdk/config` and `POST /v1/capsules` over [HttpURLConnection] (the
+ * `GET /v1/sdk/config`, `POST /v1/capsules` and `POST /v1/envelope` over [HttpURLConnection] (the
  * SDK's own traffic never goes through the app's OkHttp client, so it is not
  * captured or replayed).
  */
@@ -67,10 +75,30 @@ internal class BackendClient(
         }
     }
 
-    override fun upload(bytes: ByteArray): UploadResult {
+    override fun upload(bytes: ByteArray): UploadResult =
+        post("/v1/capsules", bytes, "application/octet-stream", gzipEncoded = false) { json ->
+            UploadResult(UploadStatus.UPLOADED, serverId = J.str(json?.get("id")))
+        }
+
+    override fun sendEnvelope(gzippedJson: ByteArray): UploadResult =
+        post("/v1/envelope", gzippedJson, "application/json", gzipEncoded = true) { json ->
+            val rejected = J.list(json?.get("rejected")) ?: emptyList()
+            if (rejected.isNotEmpty()) {
+                SdkLog.w("envelope items rejected: " + rejected.take(5).joinToString { J.str(J.obj(it)?.get("reason")) ?: "?" })
+            }
+            UploadResult(UploadStatus.UPLOADED, message = if (rejected.isEmpty()) null else "${rejected.size} items rejected")
+        }
+
+    private fun post(
+        path: String,
+        bytes: ByteArray,
+        contentType: String,
+        gzipEncoded: Boolean,
+        onSuccess: (Map<String, Any?>?) -> UploadResult,
+    ): UploadResult {
         var conn: HttpURLConnection? = null
         return try {
-            conn = (url("/v1/capsules").openConnection() as HttpURLConnection).apply {
+            conn = (url(path).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 5_000
                 // Room for a slow uplink: 20 s plus 1 s per 16 KB.
                 readTimeout = 20_000 + (bytes.size / (16 * 1024)) * 1000
@@ -78,7 +106,8 @@ internal class BackendClient(
                 doOutput = true
                 setFixedLengthStreamingMode(bytes.size)
                 setRequestProperty("Authorization", "Bearer ${config.ingestKey}")
-                setRequestProperty("Content-Type", "application/octet-stream")
+                setRequestProperty("Content-Type", contentType)
+                if (gzipEncoded) setRequestProperty("Content-Encoding", "gzip")
             }
             conn.outputStream.use { it.write(bytes) }
             val status = conn.responseCode
@@ -87,9 +116,7 @@ internal class BackendClient(
             } catch (_: Exception) {
                 null
             }
-            if (status == 200 || status == 201) {
-                return UploadResult(UploadStatus.UPLOADED, serverId = J.str(json?.get("id")))
-            }
+            if (status == 200 || status == 201 || status == 202) return onSuccess(json)
             val code = J.str(json?.get("code")) ?: "HTTP $status"
             // 4xx other than 401/408/429 never succeed: drop instead of retrying.
             val retry = status >= 500 || status == 401 || status == 408 || status == 429

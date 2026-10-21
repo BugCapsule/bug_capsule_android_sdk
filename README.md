@@ -2,18 +2,24 @@
 
 BugCapsule turns a failure seen in QA into a portable `.bugcapsule` file that a
 developer can **replay against the real app code** on an emulator, **verify**
-after a fix, and keep as a **regression test**. This repository is the native
+after a fix, and keep as a **regression test**. It also does production
+**monitoring** (error events with ANRs and native crashes, release-health
+sessions, performance tracing, user feedback; see [Monitoring](#monitoring)),
+linking each error to the capsule that replays it. This repository is the native
 Android SDK (Kotlin, Java-friendly API), its instrumentation replay runner, and
 a demo shop app. The capsule format and protocols are defined in
 `bug_capsule_flutter_sdk/spec/capsule-v1.md` and `spec/runtimes-v1.md`; the
 `bugcapsule` CLI (Dart) drives replay through `AndroidLauncher`.
 
-| Artifact (`dev.bugcapsule:…:0.3.0`) | What it is |
+| Artifact (`dev.bugcapsule:…:0.4.0`) | What it is |
 |---|---|
 | `bugcapsule-android` | Core: capsule model/codec/validator, recorder, redaction, request keys, remote config, outbox, capture (lifecycle, pointers, Back key, failures, crashes), replay engine, Views helpers, SharedPreferences and Preferences DataStore checkpoints, state serializers/restorers (incl. ViewModels) |
-| `bugcapsule-okhttp` | OkHttp capture and deterministic replay (Retrofit works through it) |
-| `bugcapsule-navigation` | Jetpack Navigation: route events, checkpoint, restore |
-| `bugcapsule-compose` | Compose helpers: semantic actions, tracked text, navigation effect |
+| `bugcapsule-okhttp` | OkHttp capture and deterministic replay (Retrofit works through it); `http.client` spans and trace propagation |
+| `bugcapsule-navigation` | Jetpack Navigation: route events, checkpoint, restore; `navigation` transactions |
+| `bugcapsule-compose` | Compose helpers: semantic actions, tracked text, navigation effect, screen tracing, feedback sheet |
+| `bugcapsule-ndk` | NDK crash handler (signal handler writing a crash record, sent on next launch) |
+| `bugcapsule-sqlite` | SQLite / Room `db.sql.query` spans (`SupportSQLiteOpenHelper.Factory` wrapper) |
+| Gradle plugin `dev.bugcapsule.gradle` | R8/ProGuard mapping UUID in the APK + `mapping.txt` upload (`bugcapsule-gradle-plugin/`, an included build) |
 | `bugcapsule-android-replay` | **androidTest only**: `BugCapsuleReplayRunner` (an `AndroidJUnitRunner`) and `BugCapsuleReplayTest` |
 
 Requirements: minSdk 23, compileSdk 34+, Kotlin or Java 17 bytecode. Preferences
@@ -33,11 +39,13 @@ android {
     buildFeatures.buildConfig = true
 }
 dependencies {
-    implementation("dev.bugcapsule:bugcapsule-android:0.3.0")
-    implementation("dev.bugcapsule:bugcapsule-okhttp:0.3.0")
-    implementation("dev.bugcapsule:bugcapsule-navigation:0.3.0")
-    implementation("dev.bugcapsule:bugcapsule-compose:0.3.0")       // if you use Compose
-    androidTestImplementation("dev.bugcapsule:bugcapsule-android-replay:0.3.0")
+    implementation("dev.bugcapsule:bugcapsule-android:0.4.0")
+    implementation("dev.bugcapsule:bugcapsule-okhttp:0.4.0")
+    implementation("dev.bugcapsule:bugcapsule-navigation:0.4.0")
+    implementation("dev.bugcapsule:bugcapsule-compose:0.4.0")       // if you use Compose
+    implementation("dev.bugcapsule:bugcapsule-ndk:0.4.0")           // native crash events (optional)
+    implementation("dev.bugcapsule:bugcapsule-sqlite:0.4.0")        // SQLite / Room spans (optional)
+    androidTestImplementation("dev.bugcapsule:bugcapsule-android-replay:0.4.0")
 }
 ```
 
@@ -161,11 +169,168 @@ activity; `t` uses `SystemClock.elapsedRealtime()`.
   launch** — no upload is attempted during process death. Such capsules carry
   `crash.persisted` (partial). `ActivityThread`'s `RuntimeException("Unable to
   start activity …")` wrapper is unwrapped to the app's exception.
-* **Not captured**: native (NDK) crashes, ANRs, `System.exit`/`killProcess`,
+* **No capsule for**: native (NDK) crashes, ANRs, `System.exit`/`killProcess`,
   OOM kills, exceptions the app catches without calling `reportError`, errors
-  inside other processes. Assertions you do not write cannot fire.
+  inside other processes. Assertions you do not write cannot fire. Native
+  crashes and ANRs are still **monitoring events**, and OOM/force-quit kills
+  in the foreground end the session as `abnormal` (see [Monitoring](#monitoring)).
 * At most 3 automatic capsules per session, one per failure signature; capsules
   are written 300 ms after the failure (crashes immediately).
+
+## Monitoring
+
+Implements [`monitoring-v1`](../bug_capsule_backend/docs/monitoring-v1.md):
+error events, release-health sessions, transactions and feedback, sent as
+gzip envelopes to `POST /v1/envelope` with the same ingest key. It runs in
+every capture session, **whether or not the session records a capsule**
+(production sampling only applies to capsules), never during replay, and
+`enabled(false)` / `monitoring(false)` turn it off.
+
+```kotlin
+BugCapsuleConfig.builder()
+    .backend(url, BuildConfig.BUGCAPSULE_INGEST_KEY)
+    // release defaults to "<appId>@<versionName>+<versionCode>", environment to production/qa/development by mode
+    .tracesSampleRate(0.2)                          // or .tracesSampler { ctx -> if (ctx.op == "app.start.cold") 1.0 else null }
+    .tracePropagationTargets("api.shop.com", "/^https://.*\\.internal\\//")  // none by default
+    .errorSampleRate(1.0)                           // fatal and capsule-linked events are always sent
+    .inAppIncludes("com.shop").inAppExcludes("com.shop.vendor")   // default: the app id
+    .beforeSend { event, hint -> if (hint.throwable is CancellationException) null else event }
+    .beforeBreadcrumb { crumb -> crumb.takeUnless { it.category == "ui.input" } }
+    .enableTimeToFullDisplayTracing(true)           // screens wait for BugCapsule.reportFullyDrawn()
+    .enableShakeToReport(true)                      // shake opens the feedback dialog
+    .build()
+```
+
+```kotlin
+BugCapsule.captureException(e, CaptureOptions(tags = mapOf("flow" to "checkout"), fingerprint = listOf("cart-total")))
+BugCapsule.captureMessage("legacy cart migrated", Level.WARNING)
+BugCapsule.reportError(e)                         // failure: capsule + event, linked both ways
+BugCapsule.setUser(User(id = "u_123", segment = "pro")); BugCapsule.setTag("plan", "pro")
+BugCapsule.setContext("cart", mapOf("items" to 3)); BugCapsule.addBreadcrumb("coupon applied", "cart")
+BugCapsule.withScope { scope -> scope.setTag("job", "sync"); BugCapsule.captureMessage("sync failed") }
+BugCapsule.lastEventId(); BugCapsule.flush(5_000); BugCapsule.close()
+
+val tx = BugCapsule.startTransaction("checkout", "task", bindToScope = true)
+val span = tx.startChild("serialize", "cart"); span.setData("items", 3); span.finish(); tx.finish()
+BugCapsule.startSpan("price cart", "task") { span -> repriceCart() }
+val ctx = BugCapsule.continueTrace(incomingTraceparent, incomingBaggage)   // then startTransaction(..., context = ctx)
+BugCapsule.getTraceparent(); BugCapsule.getBaggage()                     // for clients other than OkHttp
+BugCapsule.reportFullyDrawn()                                            // TTFD of the current screen
+
+BugCapsule.captureFeedback("Checkout button did nothing", name = "Ana", email = "ana@example.com", eventId = BugCapsule.lastEventId())
+BugCapsuleFeedbackDialog.show(activity)                                   // Views form
+if (show) BugCapsuleFeedbackSheet(onDismiss = { show = false })          // Compose (Material 3 sheet)
+BugCapsuleScreen("Checkout"); BugCapsuleFullyDrawn(ready = state.loaded) // Compose screen transaction + TTFD
+```
+
+What is sent, and how:
+
+* **Errors** (`event`): uncaught JVM exceptions (`fatal`, mechanism
+  `uncaught`, written synchronously and sent next launch), `reportError` /
+  `check` / `fail` failures, `captureException` / `captureMessage`, **ANRs**
+  (watchdog: main thread blocked 5 s in the foreground, mechanism `anr`, main
+  thread stack in `threads`) and **native crashes** with `bugcapsule-ndk`
+  (mechanism `signal`, frames with `instructionAddr`, `elf` debug images with
+  GNU build ids, the crashed process's release). Exception chains are
+  innermost cause first, frames oldest first; `inApp` from the app id or
+  `inAppIncludes`/`inAppExcludes`; `debugImages` carries the `proguard` UUID
+  from `assets/bugcapsule-debug-meta.properties`. Contexts: `device`, `os`,
+  `app`, `culture`, `screen`, `trace`.
+* **Capsule link**: when a failure also writes a capsule, the event carries
+  `capsuleId` and the capsule `manifest.monitoring = {eventId, traceId,
+  release, environment}`; a manual `capture()` links the last failure's event.
+* **Breadcrumbs** come from the flight recorder (route, action, text field
+  id, Back key, http, lifecycle, log, state, failure), so nothing is
+  instrumented twice; sessions that do not record a capsule still record
+  these light events (OkHttp then records only method, URL, status, duration).
+* **Sessions** (`session`): one per foreground run, ended 30 s after going to
+  the background (`exited`), `crashed` on an uncaught or native crash,
+  `abnormal` when the process died in the foreground (detected on the next
+  launch); the first error and the crash are sent with the event; `did` is
+  `user.id` or a random install id. `startSession()` / `endSession()` for
+  apps that manage it.
+* **Tracing** (`transaction`): activities (`ui.load`, spans
+  `ui.load.initial_display` at the first frame and `ui.load.full_display` at
+  `reportFullyDrawn`, measurements `time_to_initial_display` /
+  `time_to_full_display`), cold/warm app start (`app.start.cold|warm` span,
+  `app_start_cold|warm`), fragments (child `ui.load` spans), Navigation
+  destinations (`navigation`, named by route pattern), Compose screens,
+  frames from JankStats (`frames_total|slow|frozen`, `frames_delay`), OkHttp
+  `http.client` spans, SQLite/Room `db.sql.query` spans, `ui.action.click`
+  for semantic actions (`enableUserInteractionTracing`). Screen transactions
+  finish 3 s after their last span (at most 30 s) or when the activity
+  pauses. Sampling is decided once at the root and propagated.
+* **Trace propagation**: OkHttp requests to `tracePropagationTargets` get
+  `traceparent` (unless the app set one) and `baggage` (app entries kept).
+  Never in replay; the recorded request headers and request keys are the
+  app's own, so replay keys are unchanged.
+* **Feedback** (`feedback`): `captureFeedback`, the Views dialog, the Compose
+  sheet, shake to report; in QA mode (`captureCapsuleWithFeedback`) a capsule
+  is written too and linked by `capsuleId`.
+
+Delivery: a separate persisted outbox (`noBackupFilesDir/bugcapsule/monitoring/envelopes`,
+30 envelopes / 5 MiB / 7 days), sent 2 s after a write, on foreground and
+background, and by `flush()`; the capsule outbox rules apply (only after a
+config fetch, backoff 30 s → 1 h, `Retry-After`, 4xx dropped, items rejected
+in a `200` never retried). Items over 1 MiB lose breadcrumbs, then spans and
+frames, or are dropped. **Every item is redacted with the capsule rules
+before it is written** (ids and timestamps are kept as they are).
+
+Remote config (`/v1/sdk/config`): `monitoringEnabled: false` stops envelopes
+and deletes queued ones (capsules unaffected; `enabled: false` stops both);
+`errorSampleRate`, `tracesSampleRate` (overrides the app's rate unless it set
+a `tracesSampler`), `sessionTracking`, `maxBreadcrumbs`,
+`tracePropagationTargets` (replaces the app's list).
+
+### Native crashes (`bugcapsule-ndk`)
+
+Add the artifact: `BugCapsule.init` installs it by reflection
+(`enableNativeCrashHandling`, default on). A `sigaction` handler (SIGSEGV,
+SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP; not SIGQUIT, which ART uses for ANR
+dumps) on an alternate stack writes a text record with `write(2)` (signal,
+code, fault address, thread, up to 64 frames from `_Unwind_Backtrace` +
+`dladdr`) and chains to the previous handler, so tombstones and other
+handlers still run. Limits: `dladdr`/the unwinder are not formally
+async-signal-safe (best effort); stack overflows on threads without an
+alternate signal stack cannot be recorded; symbols are the nearest exported
+ones until unstripped `.so` files are uploaded (`kind=elf`).
+
+### Gradle plugin: ProGuard/R8 mapping upload
+
+The `dev.bugcapsule.gradle` plugin lets the backend deobfuscate stack traces
+of minified builds. For every variant with `isMinifyEnabled = true` it writes
+`assets/bugcapsule-debug-meta.properties` (`proguardUuid=<uuid>`, derived from
+`mapping.txt`: the same mapping always gets the same id; the SDK sends it as a
+`proguard` debug image) and uploads the gzipped `mapping.txt` to
+`POST <url>/v1/debug-files?kind=proguard&debugId=<uuid>` after
+`assemble<Variant>` / `bundle<Variant>`.
+
+```kotlin
+plugins { id("dev.bugcapsule.gradle") }
+bugcapsule {
+    url.set("https://bugcapsule.example.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
+    // secretKey: -PbugcapsuleSecretKey or BUGCAPSULE_SECRET_KEY (a bcs_… key: CI secrets only, never in the app)
+    uploadProguardMapping.set(true)              // automatic upload when url and key are set
+    failOnUploadError.set(true)                  // false: only warn
+}
+```
+
+Without a url or key the id is still embedded and the upload is skipped; run
+`./gradlew uploadBugCapsuleProguardMapping<Variant>` to upload by hand.
+Re-uploading the same id replaces the file. Until the plugin is published,
+use it as an included build (`pluginManagement { includeBuild("…/bugcapsule-gradle-plugin") }`).
+
+### SQLite / Room (`bugcapsule-sqlite`)
+
+```kotlin
+Room.databaseBuilder(context, ShopDb::class.java, "shop.db")
+    .openHelperFactory(BugCapsuleSQLiteOpenHelperFactory(FrameworkSQLiteOpenHelperFactory()))
+    .build()
+```
+
+Queries, statements and insert/update/delete running while a span is active
+become `db.sql.query` spans (description: the SQL; bound arguments are never
+recorded).
 
 ## Replay
 
@@ -282,6 +447,10 @@ state). Three planted bugs, all captured automatically:
    the cart crashes with `JSONException`. Replay reproduces it only because the
    launch checkpoint restores `shop_prefs`.
 
+Monitoring is on in the demo: every screen is traced, errors from the planted
+bugs arrive as events linked to their capsules, and shaking the device opens
+the feedback dialog (`bugcapsule-ndk` is included for native crash events).
+
 Build: `./gradlew :demo:assembleDebug` (export `BUGCAPSULE_INGEST_KEY=bci_…`
 to enable uploads; `-PbugcapsuleBackendUrl=` overrides `http://10.0.2.2:8787`).
 The demo's `bugcapsule.json` points the CLI at this Gradle build
@@ -304,9 +473,14 @@ inconclusive with `network.unrecorded`.
 ## Tests
 
 ```
-./gradlew :bugcapsule-android:testDebugUnitTest :bugcapsule-okhttp:testDebugUnitTest :bugcapsule-navigation:testDebugUnitTest
+./gradlew test                                   # every module, plus the Gradle plugin's tests
 ./gradlew :demo:connectedDebugAndroidTest        # emulator; unset BUGCAPSULE_INGEST_KEY first
+bugcapsule-ndk/src/test/native/smoke.sh          # host smoke test of the signal handler (clang)
 ```
+
+Monitoring is tested against a stubbed backend (MockWebServer speaking
+monitoring-v1): envelopes, capsule links, sessions, sampling, remote config,
+Retry-After, trace propagation, feedback.
 
 The vendored `spec-fixtures/` must equal `../bug_capsule_flutter_sdk/spec/fixtures`
 (`FixtureSyncTest`); re-sync with `bug_capsule_flutter_sdk/tool/sync_spec.sh`.
@@ -324,6 +498,12 @@ The vendored `spec-fixtures/` must equal `../bug_capsule_flutter_sdk/spec/fixtur
 * Clock/random determinism only through `BugCapsule.currentTimeMillis()` and
   `BugCapsule.random()`. WorkManager, alarms, Bluetooth, location, other
   network stacks (HttpURLConnection, Ktor, Cronet) are not captured.
+* Monitoring: coroutines do not carry the current span (`startSpan` is per
+  thread; HTTP and database spans attach to the scope's transaction); the
+  ANR watchdog reports hangs while the process is alive (ANRs that kill the
+  app before 5 s are `abnormal` sessions); NDK frames are not symbolicated on
+  device and the NDK handler is not yet verified on devices (host smoke test
+  and builds only).
 * Navigation arguments that are Parcelables are not restored; state needs
   registered serializers. Periodic checkpoints are used only when the session
   outgrows the 5-minute / 20,000-event window.

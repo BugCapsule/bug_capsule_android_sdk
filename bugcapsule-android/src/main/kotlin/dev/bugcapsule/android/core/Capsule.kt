@@ -286,6 +286,8 @@ data class CapsuleManifest(
     val redactionHeaders: List<String> = emptyList(),
     val runtime: RuntimeInfo? = null,
     val capabilities: Map<String, String> = emptyMap(),
+    /** monitoring-v1 §4.3: `{eventId, traceId?, release, environment}` of the event sent for this failure. */
+    val monitoring: Map<String, Any?>? = null,
 ) {
     val runtimeName: String get() = runtime?.name ?: RuntimeInfo.infer(sdkName)
 
@@ -314,6 +316,7 @@ data class CapsuleManifest(
         }
         if (runtime != null) it["runtime"] = runtime.toJson()
         if (capabilities.isNotEmpty()) it["capabilities"] = capabilities
+        if (monitoring != null) it["monitoring"] = monitoring
     }
 
     companion object {
@@ -345,6 +348,7 @@ data class CapsuleManifest(
                 redactionHeaders = (J.list(redaction["extraHeaders"]) ?: emptyList()).map { it as String },
                 runtime = J.obj(j["runtime"])?.let { RuntimeInfo.fromJson(it) },
                 capabilities = (J.obj(j["capabilities"]) ?: emptyMap()).mapValues { it.value as String },
+                monitoring = J.obj(j["monitoring"]),
             )
         }
     }

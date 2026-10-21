@@ -9,6 +9,7 @@ import dev.bugcapsule.android.core.FixtureStore
 import dev.bugcapsule.android.core.RecordedWindow
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.core.ReplaySettings
+import dev.bugcapsule.android.monitoring.HttpSpanHandle
 
 /** What the runtime exposes to integrations (OkHttp, Navigation, storage...). */
 interface BugCapsuleSession {
@@ -17,6 +18,14 @@ interface BugCapsuleSession {
 
     /** True while events are recorded (capture enabled and sampled). */
     val isRecording: Boolean
+
+    /**
+     * True while recorded events are wanted at all: capsule recording, or
+     * monitoring breadcrumbs (every capture session, sampled or not). Light
+     * events (routes, actions, HTTP summaries) are worth recording when this
+     * is true even if [isRecording] is false.
+     */
+    val isObserving: Boolean get() = isRecording
     val isReplaying: Boolean
     val redactor: Redactor
     val captureNetworkBodies: Boolean
@@ -39,6 +48,13 @@ interface BugCapsuleSession {
 
     /** Runs [task] on the SDK's background executor after [delayMs]. */
     fun schedule(delayMs: Long, task: Runnable)
+
+    /**
+     * Monitoring: an `http.client` span under the active span plus the trace
+     * headers for [url] (`tracePropagationTargets`). Null in replay or when
+     * monitoring is off: then no header may be added.
+     */
+    fun startHttpSpan(method: String, url: String): HttpSpanHandle? = null
 }
 
 /** Replay services for integrations. */
@@ -100,6 +116,11 @@ interface BugCapsuleIntegration {
 
     /** Capability keys this integration adds to `manifest.capabilities`. */
     fun capabilities(): Map<String, String> = emptyMap()
+}
+
+/** Body of [BugCapsule.startSpan]. */
+fun interface SpanBlock<T> {
+    fun run(span: dev.bugcapsule.android.monitoring.Span): T
 }
 
 /** Serializes registered state to JSON-safe values for periodic checkpoints. */

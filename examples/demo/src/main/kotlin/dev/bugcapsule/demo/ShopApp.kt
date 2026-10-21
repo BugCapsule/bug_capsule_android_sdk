@@ -20,6 +20,11 @@ class ShopApp : Application() {
             .flavor(if (DemoFixes.active.isEmpty()) "demo" else "demo+fix:" + DemoFixes.active.joinToString(","))
             .redactKeys("loyaltyId")
             .label("app", "android-demo")
+            // Monitoring (errors, sessions and feedback are on by default):
+            // trace every screen in this QA build and let testers shake to report.
+            .tracesSampleRate(1.0)
+            .enableTimeToFullDisplayTracing(false)
+            .enableShakeToReport(true)
         if (BuildConfig.BUGCAPSULE_INGEST_KEY.isNotEmpty()) {
             builder.backend(BuildConfig.BUGCAPSULE_URL, BuildConfig.BUGCAPSULE_INGEST_KEY)
         }

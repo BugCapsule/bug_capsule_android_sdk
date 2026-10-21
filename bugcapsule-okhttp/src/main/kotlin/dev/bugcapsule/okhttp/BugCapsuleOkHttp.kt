@@ -12,6 +12,8 @@ import dev.bugcapsule.android.core.JsonDepthException
 import dev.bugcapsule.android.core.JsonFormatException
 import dev.bugcapsule.android.core.RecordedWindow
 import dev.bugcapsule.android.core.RequestKeyBuilder
+import dev.bugcapsule.android.monitoring.HttpSpanHandle
+import dev.bugcapsule.android.monitoring.TraceHeaders
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType
@@ -67,6 +69,12 @@ fun interface RequestFilter {
  * app reads it (same bytes, same timing) and only a bounded prefix is kept
  * (`maxBodyBytes`, binary [maxBinaryBytes]); one-shot and duplex request
  * bodies are never read (keyed without a hash, recorded as `omitted`).
+ *
+ * Monitoring (monitoring-v1 §8): each call is an `http.client` span of the
+ * active transaction, and requests to `tracePropagationTargets` carry
+ * `traceparent` / `baggage` (never in replay; headers are not part of
+ * request keys, and recorded request headers are the app's own). Sessions
+ * that do not record a capsule still get an `http` breadcrumb per call.
  */
 class BugCapsuleOkHttp @JvmOverloads constructor(
     rules: List<EndpointRule> = emptyList(),
@@ -127,8 +135,57 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
         val s = session ?: return chain.proceed(chain.request())
         val replay = s.replay
         if (replay != null) return replay(chain, s, replay)
-        if (!s.isRecording) return chain.proceed(chain.request())
-        return capture(chain, s)
+        val request = chain.request()
+        val span = try {
+            s.startHttpSpan(request.method, request.url.toString())
+        } catch (_: Exception) {
+            null
+        }
+        val outgoing = withTraceHeaders(request, span)
+        val response = try {
+            when {
+                s.isRecording -> capture(chain, s, outgoing)
+                s.isObserving -> observe(chain, s, outgoing)
+                else -> chain.proceed(outgoing)
+            }
+        } catch (e: IOException) {
+            span?.finish(null, e)
+            throw e
+        }
+        span?.finish(response.code, null)
+        return response
+    }
+
+    private fun withTraceHeaders(request: Request, span: HttpSpanHandle?): Request {
+        if (span == null) return request
+        val headers = try {
+            span.headers(request.header(TraceHeaders.TRACEPARENT), request.header(TraceHeaders.BAGGAGE))
+        } catch (_: Exception) {
+            emptyMap()
+        }
+        if (headers.isEmpty()) return request
+        val b = request.newBuilder()
+        for ((name, value) in headers) b.header(name, value)
+        return b.build()
+    }
+
+    /** Not recording a capsule: a summary event for the breadcrumb, no bodies, no key. */
+    private fun observe(chain: Interceptor.Chain, s: BugCapsuleSession, request: Request): Response {
+        val started = System.nanoTime()
+        fun summary(status: Int) = linkedMapOf<String, Any?>(
+            "method" to request.method.uppercase(),
+            "url" to s.redactor.redactUrl(request.url.toString()),
+            "status" to status,
+            "durationMs" to (System.nanoTime() - started) / 1_000_000,
+        )
+        val response = try {
+            chain.proceed(request)
+        } catch (e: IOException) {
+            record(s) { summary(0).apply { put("error", errorJson(s, e, chain.call().isCanceled())) } }
+            throw e
+        }
+        record(s) { summary(response.code) }
+        return response
     }
 
     // ------------------------------------------------------------- bodies
@@ -232,7 +289,8 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
 
     // ------------------------------------------------------------ capture
 
-    private fun capture(chain: Interceptor.Chain, s: BugCapsuleSession): Response {
+    /** [outgoing] is what is sent (trace headers added); recorded data and keys come from the app's request. */
+    private fun capture(chain: Interceptor.Chain, s: BugCapsuleSession, outgoing: Request): Response {
         val request = chain.request()
         val started = System.nanoTime()
         fun elapsed() = (System.nanoTime() - started) / 1_000_000
@@ -307,7 +365,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
             }
         }
         val response = try {
-            chain.proceed(request)
+            chain.proceed(outgoing)
         } catch (e: IOException) {
             if (key != null && inFlight.remove(token) != null) {
                 record(s) {
