@@ -27,7 +27,9 @@ import java.util.zip.ZipFile
  * end
  * ```
  *
- * Frames are crashing frame first; `-` means unknown. A record without `end`
+ * Frames are crashing frame first: its exact PC, then the callers' return
+ * addresses as unwound (made `- 1` when sent, see [NativeCrashes.fill]);
+ * `-` means unknown. A record without `end`
  * (the handler died while unwinding) is still used.
  */
 internal class NativeCrashRecord(
@@ -253,11 +255,16 @@ internal class NativeCrashes(private val dir: File) {
     fun delete(file: File) = Files.deleteQuietly(file)
 
     companion object {
-        /** Fills an event from [record]. */
+        /**
+         * Fills an event from [record]. `instructionAddr` is the exact PC for
+         * the crashing frame and the return address minus one for every
+         * caller, so it points into the call instruction (monitoring-v1 §3:
+         * the server resolves addresses exactly as sent).
+         */
         fun fill(ev: MutableMap<String, Any?>, record: NativeCrashRecord, appId: String, buildIds: (String) -> String?) {
             val images = LinkedHashMap<String, MutableMap<String, Any?>>()
-            val frames = record.frames.reversed().map { f ->
-                val frame = linkedMapOf<String, Any?>("instructionAddr" to hex(f.pc))
+            val frames = record.frames.mapIndexed { i, f -> f to (if (i == 0 || f.pc == 0L) f.pc else f.pc - 1) }.reversed().map { (f, addr) ->
+                val frame = linkedMapOf<String, Any?>("instructionAddr" to hex(addr))
                 if (f.symbol != null) frame["function"] = f.symbol
                 if (f.image != null) {
                     frame["package"] = f.image
