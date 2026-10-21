@@ -17,4 +17,6 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.retrofit)
     testImplementation(libs.retrofit.gson)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

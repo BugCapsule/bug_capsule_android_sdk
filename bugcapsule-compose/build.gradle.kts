@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-description = "BugCapsule Jetpack Compose helpers: semantic actions, tracked text, navigation"
+description = "BugCapsule Jetpack Compose helpers: semantic actions, tracked text, navigation, screen tracing, feedback sheet"
 
 android {
     namespace = "dev.bugcapsule.compose"
@@ -17,6 +17,9 @@ dependencies {
     implementation(platform(libs.compose.bom))
     api(libs.compose.runtime)
     api(libs.compose.ui)
+    // The feedback sheet (Material 3 ModalBottomSheet).
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material3)
 
     testImplementation(libs.junit)
 }

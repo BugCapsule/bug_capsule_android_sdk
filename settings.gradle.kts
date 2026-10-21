@@ -1,4 +1,6 @@
 pluginManagement {
+    // ProGuard/R8 mapping UUID + upload (dev.bugcapsule.gradle), used by the demo.
+    includeBuild("bugcapsule-gradle-plugin")
     repositories {
         google()
         mavenCentral()
@@ -20,6 +22,8 @@ include(":bugcapsule-android")
 include(":bugcapsule-okhttp")
 include(":bugcapsule-navigation")
 include(":bugcapsule-compose")
+include(":bugcapsule-ndk")
+include(":bugcapsule-sqlite")
 include(":bugcapsule-android-replay")
 include(":demo")
 project(":demo").projectDir = file("examples/demo")

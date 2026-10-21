@@ -168,4 +168,27 @@ class RemoteConfigTest {
         } catch (_: IllegalArgumentException) {
         }
     }
+
+    @Test
+    fun monitoringFieldsParseAndSurviveTheCache() {
+        val c = RemoteCaptureConfig.fromJson(
+            mapOf(
+                "monitoringEnabled" to false, "errorSampleRate" to 0.5, "tracesSampleRate" to 2.0,
+                "sessionTracking" to false, "maxBreadcrumbs" to 500L, "tracePropagationTargets" to listOf("api.shop.com"),
+                "storeIpAddresses" to true, "apdexThresholdMs" to 300L,
+            ),
+            fetchedAtMs = 1,
+        )
+        assertEquals(false, c.monitoringEnabled)
+        assertEquals(0.5, c.errorSampleRate!!, 0.0)
+        assertEquals("clamped", 1.0, c.tracesSampleRate!!, 0.0)
+        assertEquals(false, c.sessionTracking)
+        assertEquals(100, c.maxBreadcrumbs)
+        assertEquals(listOf("api.shop.com"), c.tracePropagationTargets)
+        assertEquals(c, RemoteCaptureConfig.fromJson(c.toJson()))
+        val old = RemoteCaptureConfig.fromJson(mapOf("enabled" to true), fetchedAtMs = 1)
+        assertEquals(true, old.monitoringEnabled)
+        assertEquals(null, old.errorSampleRate)
+        assertEquals(null, old.tracePropagationTargets)
+    }
 }

@@ -84,6 +84,11 @@ subprojects {
     }
 }
 
+tasks.register("test") {
+    description = "Runs the BugCapsule Gradle plugin tests (subprojects run their own `test`)."
+    dependsOn(gradle.includedBuild("bugcapsule-gradle-plugin").task(":test"))
+}
+
 tasks.register("publishAll") {
     group = "publishing"
     description = "Publishes every SDK artifact to build/repo (a local Maven file repository)."

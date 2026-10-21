@@ -6,7 +6,7 @@ import dev.bugcapsule.android.core.Json
 import java.io.File
 import java.util.Random
 
-/** Capture config the backend can change at runtime (kill switch, sampling, bodies, redaction). */
+/** Capture config the backend can change at runtime (kill switch, sampling, bodies, redaction, monitoring). */
 data class RemoteCaptureConfig(
     val enabled: Boolean,
     val sampleRate: Double,
@@ -16,6 +16,15 @@ data class RemoteCaptureConfig(
     val configTtlSeconds: Long,
     /** Wall clock (epoch ms) of the successful fetch this config came from. */
     val fetchedAtMs: Long,
+    // monitoring-v1 §10. Null: the server did not send the field (older backend).
+    /** False: no envelopes are sent (capsules unaffected). */
+    val monitoringEnabled: Boolean = true,
+    val errorSampleRate: Double? = null,
+    val tracesSampleRate: Double? = null,
+    val sessionTracking: Boolean = true,
+    val maxBreadcrumbs: Int? = null,
+    /** When set, replaces the app's `tracePropagationTargets`. */
+    val tracePropagationTargets: List<String>? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf(
         "enabled" to enabled,
@@ -25,6 +34,12 @@ data class RemoteCaptureConfig(
         "redactKeys" to redactKeys,
         "configTtlSeconds" to configTtlSeconds,
         "fetchedAtMs" to fetchedAtMs,
+        "monitoringEnabled" to monitoringEnabled,
+        "errorSampleRate" to errorSampleRate,
+        "tracesSampleRate" to tracesSampleRate,
+        "sessionTracking" to sessionTracking,
+        "maxBreadcrumbs" to maxBreadcrumbs,
+        "tracePropagationTargets" to tracePropagationTargets,
     )
 
     companion object {
@@ -38,6 +53,7 @@ data class RemoteCaptureConfig(
                 if (type.isInstance(v)) return type.cast(v)
                 throw IllegalArgumentException("remote config \"$key\" has type ${v.javaClass.simpleName}")
             }
+            fun rate(key: String): Double? = field(key, Double::class.javaObjectType)?.let { if (it.isNaN()) 0.0 else it.coerceIn(0.0, 1.0) }
             val rate = field("sampleRate", Double::class.javaObjectType) ?: 1.0
             val ttl = field("configTtlSeconds", Long::class.javaObjectType) ?: 300L
             val maxBytes = field("maxCapsuleBytes", Long::class.javaObjectType) ?: (5L * 1024 * 1024)
@@ -49,6 +65,12 @@ data class RemoteCaptureConfig(
                 redactKeys = (field("redactKeys", List::class.java) ?: emptyList<Any?>()).map { it.toString() },
                 configTtlSeconds = ttl.coerceIn(0, 86_400),
                 fetchedAtMs = fetchedAtMs ?: field("fetchedAtMs", Long::class.javaObjectType) ?: 0L,
+                monitoringEnabled = field("monitoringEnabled", Boolean::class.javaObjectType) ?: true,
+                errorSampleRate = rate("errorSampleRate"),
+                tracesSampleRate = rate("tracesSampleRate"),
+                sessionTracking = field("sessionTracking", Boolean::class.javaObjectType) ?: true,
+                maxBreadcrumbs = field("maxBreadcrumbs", Long::class.javaObjectType)?.coerceIn(0, 100)?.toInt(),
+                tracePropagationTargets = field("tracePropagationTargets", List::class.java)?.map { it.toString() },
             )
         }
     }
@@ -211,6 +233,7 @@ class RemoteConfigController(
         redactKeys = c?.redactKeys ?: emptyList(),
         configTtlSeconds = c?.configTtlSeconds ?: 0,
         fetchedAtMs = c?.fetchedAtMs ?: 0,
+        monitoringEnabled = false,
     )
 
     private fun jitter(ms: Long): Long = Math.round(ms * (0.8 + random.nextDouble() * 0.4))

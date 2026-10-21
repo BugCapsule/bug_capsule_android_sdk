@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-description = "BugCapsule for Android: capture failures as replayable .bugcapsule capsules"
+description = "BugCapsule for Android: replayable .bugcapsule capsules plus error, session, performance and feedback monitoring"
 
 android {
     namespace = "dev.bugcapsule.android"
@@ -16,6 +16,13 @@ dependencies {
     compileOnly(libs.datastore.preferences.core)
     compileOnly(libs.coroutines.core)
     implementation("androidx.annotation:annotation:1.9.1")
+    // Frame metrics (slow/frozen frames) of screen transactions. JankStats
+    // pins an old androidx.core at runtime; the app's (newer) one wins.
+    implementation(libs.metrics.performance)
+    implementation(libs.core.ktx)
+    // Fragment spans are added only when the app uses AndroidX Fragments.
+    compileOnly(libs.fragment.ktx)
+    compileOnly(libs.activity.ktx)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
@@ -23,6 +30,7 @@ dependencies {
     testImplementation(libs.datastore.preferences.core)
     testImplementation(libs.coroutines.core)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.fragment.ktx)
 }
 
 // The shared spec fixtures (../spec-fixtures) are read from the file system
