@@ -6,6 +6,7 @@ import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavController
 import androidx.navigation.NavDestination
 import androidx.navigation.NavGraph
+import dev.bugcapsule.android.BugCapsule
 import dev.bugcapsule.android.BugCapsuleIntegration
 import dev.bugcapsule.android.BugCapsuleSession
 import dev.bugcapsule.android.core.CheckpointKind
@@ -33,12 +34,18 @@ fun interface LocationSanitizer {
  * navigation.attach(navHostFragment.navController)
  * ```
  *
+ * Monitoring: each destination change starts a `navigation` transaction
+ * named after the destination's route pattern (`/product/{id}`, never the
+ * arguments) with its initial display, and route events become navigation
+ * breadcrumbs. Pass `traceScreens = false` to keep only the breadcrumbs.
+ *
  * Works with Fragment and Compose navigation (any [NavController]). Routes
  * are redacted like URLs (sensitive query values); argument values that are
  * not strings or numbers (Parcelables) are not restored.
  */
 class BugCapsuleNavigation @JvmOverloads constructor(
     private val sanitizeLocation: LocationSanitizer? = null,
+    private val traceScreens: Boolean = true,
 ) : BugCapsuleIntegration, NavController.OnDestinationChangedListener {
     override val name: String = NAME
 
@@ -74,10 +81,11 @@ class BugCapsuleNavigation @JvmOverloads constructor(
 
     override fun onDestinationChanged(controller: NavController, destination: NavDestination, arguments: Bundle?) {
         val s = session ?: return
-        if (!s.isRecording) return
+        if (!s.isObserving) return
         try {
             val location = location(s, destination, arguments)
             if (location == lastLocation) return
+            if (traceScreens && !s.isReplaying) BugCapsule.startScreen("/" + name(destination), "navigation")
             val action = if (lastLocation == null) "reset" else "push"
             lastLocation = location
             s.record(EventTypes.ROUTE, linkedMapOf("location" to location, "source" to "navigation", "action" to action))

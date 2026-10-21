@@ -2,6 +2,9 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    // Embeds the R8 mapping UUID and uploads mapping.txt (minified variants only;
+    // url / secret key from -PbugcapsuleUrl / BUGCAPSULE_URL and BUGCAPSULE_SECRET_KEY).
+    id("dev.bugcapsule.gradle")
 }
 
 /** A Gradle property (`-Pname=...`) or, failing that, an environment variable. */
@@ -66,6 +69,7 @@ dependencies {
     implementation(project(":bugcapsule-okhttp"))
     implementation(project(":bugcapsule-navigation"))
     implementation(project(":bugcapsule-compose"))
+    implementation(project(":bugcapsule-ndk"))
 
     implementation(libs.core.ktx)
     implementation(libs.appcompat)

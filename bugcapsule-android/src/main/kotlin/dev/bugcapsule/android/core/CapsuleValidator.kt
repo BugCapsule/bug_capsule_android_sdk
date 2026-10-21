@@ -166,6 +166,12 @@ object CapsuleValidator {
         int(session, "durationMs", "$mp.session")
 
         optObj(m, "failure", mp)?.let { validateFailure(it, "$mp.failure") }
+        optObj(m, "monitoring", mp)?.let {
+            optString(it, "eventId", "$mp.monitoring", max = 100)
+            optString(it, "traceId", "$mp.monitoring", max = 100)
+            optString(it, "release", "$mp.monitoring", max = 200)
+            optString(it, "environment", "$mp.monitoring", max = 64)
+        }
 
         val eligibility = obj(m["eligibility"], "$mp.eligibility")
         enum(eligibility, "status", "$mp.eligibility", listOf("eligible", "partial", "ineligible"))
