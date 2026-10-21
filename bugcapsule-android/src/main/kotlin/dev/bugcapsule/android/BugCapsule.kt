@@ -14,6 +14,19 @@ import dev.bugcapsule.android.internal.Host
 import dev.bugcapsule.android.internal.Runtime
 import dev.bugcapsule.android.internal.SdkLog
 import dev.bugcapsule.android.internal.UploadResult
+import dev.bugcapsule.android.monitoring.Breadcrumb
+import dev.bugcapsule.android.monitoring.CaptureOptions
+import dev.bugcapsule.android.monitoring.CurrentSpan
+import dev.bugcapsule.android.monitoring.Ids as TraceIds
+import dev.bugcapsule.android.monitoring.Level
+import dev.bugcapsule.android.monitoring.NoopHub
+import dev.bugcapsule.android.monitoring.Scope
+import dev.bugcapsule.android.monitoring.ScopeCallback
+import dev.bugcapsule.android.monitoring.Span
+import dev.bugcapsule.android.monitoring.SpanStatus
+import dev.bugcapsule.android.monitoring.TraceContext
+import dev.bugcapsule.android.monitoring.Transaction
+import dev.bugcapsule.android.monitoring.User
 import java.io.File
 import java.util.Random
 import java.util.concurrent.CompletableFuture
@@ -131,7 +144,7 @@ object BugCapsule {
     @JvmOverloads
     fun recordAction(id: String, payload: Map<String, Any?>? = null) {
         val rt = runtime ?: return
-        if (!rt.isRecording) return
+        if (!rt.isObserving) return
         val data = linkedMapOf<String, Any?>("id" to cut(id, 200))
         if (payload != null) data["payload"] = payload
         rt.record(EventTypes.ACTION, data)
@@ -161,7 +174,7 @@ object BugCapsule {
             if (value == last) return
             last = value
             val rt = runtime ?: return
-            if (!rt.isRecording) return
+            if (!rt.isObserving) return
             val clean = rt.redactor.redactText(id, value, sensitive)
             rt.record(EventTypes.TEXT, linkedMapOf("id" to cut(id, 200), "value" to cut(clean, 100_000)))
         }
@@ -186,7 +199,12 @@ object BugCapsule {
         if (!condition) fail(assertionId, message)
     }
 
-    /** Reports a caught exception as a failure (captured like an uncaught one, without the crash). */
+    /**
+     * Reports a caught exception as a failure: recorded, captured as a
+     * capsule like an uncaught one (without the crash) and sent as an error
+     * event linked to it. Use [captureException] for errors that only need
+     * an event.
+     */
     @JvmStatic
     fun reportError(error: Throwable) {
         runtime?.reportError(error)
@@ -259,6 +277,197 @@ object BugCapsule {
         val rt = runtime ?: return
         rt.registerState(key, serializer, restorer)
         viewModel.addCloseable(AutoCloseable { rt.unregisterState(key, serializer) })
+    }
+
+    // ----------------------------------------------------------- monitoring
+
+    /**
+     * Sends [error] as an error event (mechanism `manual`, handled) without
+     * recording a failure or writing a capsule. Returns the event id, or
+     * null when monitoring is off, the event was sampled out or dropped.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun captureException(error: Throwable, options: CaptureOptions? = null): String? =
+        runtime?.monitoring?.captureException(
+            error,
+            dev.bugcapsule.android.monitoring.ExceptionMapper.Mechanism("manual", true),
+            options,
+        )?.eventId
+
+    /** Sends a message event (the calling thread's stack is attached unless `attachStacktrace` is off). */
+    @JvmStatic
+    @JvmOverloads
+    fun captureMessage(message: String, level: Level = Level.INFO, options: CaptureOptions? = null): String? =
+        runtime?.monitoring?.captureMessage(message, level, options)?.eventId
+
+    /**
+     * Sends user feedback (monitoring-v1 §9). [eventId] links it to an
+     * event's issue; [captureCapsule] (default `captureCapsuleWithFeedback`,
+     * true in QA mode) also writes a capsule of the session, linked by
+     * `capsuleId`. Returns the feedback id.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun captureFeedback(
+        message: String,
+        name: String? = null,
+        email: String? = null,
+        eventId: String? = null,
+        captureCapsule: Boolean? = null,
+    ): String? = runtime?.captureFeedback(message, name, email, eventId, captureCapsule)
+
+    /** Id of the last event sent (or queued) in this process. */
+    @JvmStatic
+    fun lastEventId(): String? = runtime?.monitoring?.lastEventId
+
+    /** The global scope (null before [init] or with monitoring off). */
+    @JvmStatic
+    fun scope(): Scope? = runtime?.monitoring?.scope
+
+    /** Changes the global scope. */
+    @JvmStatic
+    fun configureScope(callback: ScopeCallback) {
+        runtime?.monitoring?.scope?.let { callback.configure(it) }
+    }
+
+    /** Runs [callback] with a temporary copy of the scope: events captured inside on this thread use it. */
+    @JvmStatic
+    fun withScope(callback: ScopeCallback) {
+        val mon = runtime?.monitoring ?: return
+        mon.withScope { callback.configure(it) }
+    }
+
+    @JvmStatic
+    fun setUser(user: User?) = configureScope { it.setUser(user) }
+
+    @JvmStatic
+    fun setTag(key: String, value: String) = configureScope { it.setTag(key, value) }
+
+    @JvmStatic
+    fun setTags(tags: Map<String, String>) = configureScope { it.setTags(tags) }
+
+    @JvmStatic
+    fun setExtra(key: String, value: Any?) = configureScope { it.setExtra(key, value) }
+
+    @JvmStatic
+    fun setExtras(extras: Map<String, Any?>) = configureScope { it.setExtras(extras) }
+
+    @JvmStatic
+    fun setContext(name: String, value: Map<String, Any?>?) = configureScope { it.setContext(name, value) }
+
+    @JvmStatic
+    fun setLevel(level: Level?) = configureScope { it.setLevel(level) }
+
+    @JvmStatic
+    fun setFingerprint(fingerprint: List<String>?) = configureScope { it.setFingerprint(fingerprint) }
+
+    /** Adds a breadcrumb (after `beforeBreadcrumb`). Recorded events become breadcrumbs automatically. */
+    @JvmStatic
+    fun addBreadcrumb(breadcrumb: Breadcrumb) {
+        runtime?.monitoring?.addBreadcrumb(breadcrumb)
+    }
+
+    @JvmStatic
+    @JvmOverloads
+    fun addBreadcrumb(message: String, category: String? = null) = addBreadcrumb(Breadcrumb(message, category = category))
+
+    @JvmStatic
+    fun clearBreadcrumbs() = configureScope { it.clearBreadcrumbs() }
+
+    /**
+     * Starts a transaction (sampled at this root with `tracesSampler` /
+     * `tracesSampleRate`, or continuing [context]). [bindToScope] makes it
+     * the scope's active span, the parent of HTTP and database spans. Always
+     * [Transaction.finish] it.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun startTransaction(name: String, op: String, bindToScope: Boolean = false, context: TraceContext? = null): Transaction =
+        runtime?.monitoring?.startTransaction(name, op, context, bindToScope)
+            ?: Transaction(NoopHub, name, op, TraceIds.traceId(), TraceIds.spanId(), null, false, null, null)
+
+    /**
+     * Runs [block] in a span named [name]: a child of the active span, or a
+     * new transaction. The span is current on this thread while [block]
+     * runs and finishes after it (`internal_error` when it throws).
+     */
+    @JvmStatic
+    fun <T> startSpan(name: String, op: String, block: SpanBlock<T>): T {
+        val parent = activeSpan()
+        val span = parent?.startChild(op, name) ?: startTransaction(name, op)
+        val previous = CurrentSpan.get()
+        CurrentSpan.set(span)
+        try {
+            val result = block.run(span)
+            if (!span.isFinished) span.finish()
+            return result
+        } catch (e: Throwable) {
+            span.finish(SpanStatus.INTERNAL_ERROR)
+            throw e
+        } finally {
+            CurrentSpan.set(previous)
+        }
+    }
+
+    /** The span new work attaches to: the current span of this thread, else the scope's. */
+    @JvmStatic
+    fun activeSpan(): Span? = runtime?.monitoring?.activeSpan()
+
+    /** `traceparent` for a custom HTTP client (null when monitoring is off or replaying). */
+    @JvmStatic
+    fun getTraceparent(): String? = runtime?.takeIf { !it.isReplaying }?.monitoring?.traceparent()
+
+    /** `baggage` for a custom HTTP client. */
+    @JvmStatic
+    fun getBaggage(): String? = runtime?.takeIf { !it.isReplaying }?.monitoring?.baggageHeader()
+
+    /** Continues an incoming trace: pass the result to [startTransaction]. Null when the header is invalid. */
+    @JvmStatic
+    @JvmOverloads
+    fun continueTrace(traceparent: String?, baggage: String? = null): TraceContext? =
+        runtime?.monitoring?.continueTrace(traceparent, baggage)
+
+    /** Starts a release-health session now (sessions are otherwise automatic). */
+    @JvmStatic
+    fun startSession() {
+        runtime?.monitoring?.sessions?.start()
+    }
+
+    @JvmStatic
+    fun endSession() {
+        runtime?.monitoring?.sessions?.end()
+    }
+
+    /**
+     * Marks the current screen fully drawn: ends `ui.load.full_display`
+     * (TTFD) when `enableTimeToFullDisplayTracing` is on. Main thread.
+     */
+    @JvmStatic
+    fun reportFullyDrawn() {
+        runtime?.reportFullyDrawn()
+    }
+
+    /**
+     * Starts a screen transaction for a single-activity app ([op]
+     * `navigation` for Navigation destinations, `ui.load` for Compose
+     * screens). [name] must not contain ids (`/product/{id}`, not `/product/42`).
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun startScreen(name: String, op: String = "ui.load", view: android.view.View? = null): Transaction? =
+        runtime?.startScreen(name, op, view)
+
+    /** Sends queued envelopes now, waiting up to [timeoutMs]; true when nothing is left queued. */
+    @JvmStatic
+    @JvmOverloads
+    fun flush(timeoutMs: Long = 5_000): Boolean = runtime?.monitoring?.flush(timeoutMs) ?: true
+
+    /** Ends the session, flushes and stops monitoring for this process (capsules are unaffected). */
+    @JvmStatic
+    @JvmOverloads
+    fun close(timeoutMs: Long = 5_000) {
+        runtime?.monitoring?.close(timeoutMs)
     }
 
     // -------------------------------------------------------------- support

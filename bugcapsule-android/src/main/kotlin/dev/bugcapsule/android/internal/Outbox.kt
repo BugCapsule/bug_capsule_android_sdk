@@ -25,7 +25,12 @@ class UploadOutbox(
     val limits: OutboxLimits = OutboxLimits(),
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
+    /** File extension of the entries: `bugcapsule` for capsules, `envelope` for monitoring envelopes (gzip too). */
+    private val extension: String = "bugcapsule",
 ) {
+    private val name = Regex("^(?:(\\d+)_)?([A-Za-z0-9-]{1,100})\\.${Regex.escape(extension)}$")
+    private val noun = if (extension == "bugcapsule") "capsule" else extension
+
     private val lock = Any()
     private val flushLock = Any()
 
@@ -51,7 +56,7 @@ class UploadOutbox(
         val out = ArrayList<OutboxEntry>()
         for (f in dir.listFiles() ?: emptyArray()) {
             if (!f.isFile) continue
-            val m = NAME.matchEntire(f.name) ?: continue
+            val m = name.matchEntire(f.name) ?: continue
             val ms = m.groupValues[1].toLongOrNull()
             out.add(OutboxEntry(f, m.groupValues[2], ms ?: f.lastModified(), f.length()))
         }
@@ -63,11 +68,11 @@ class UploadOutbox(
     fun enqueue(capsuleId: String, bytes: ByteArray): Boolean {
         if (closed || bytes.size > limits.maxBytes) return false
         synchronized(lock) {
-            val file = File(dir, "${nowMs()}_$capsuleId.bugcapsule")
+            val file = File(dir, "${nowMs()}_$capsuleId.$extension")
             try {
                 Files.writeAtomically(file, bytes)
             } catch (e: IOException) {
-                SdkLog.w("could not queue capsule $capsuleId: ${e.message}")
+                SdkLog.w("could not queue $noun $capsuleId: ${e.message}")
                 return false
             }
             enforceLimits()
@@ -118,7 +123,7 @@ class UploadOutbox(
                 continue
             }
             if (bytes.size < 2 || bytes[0] != 0x1f.toByte() || bytes[1] != 0x8b.toByte()) {
-                SdkLog.w("dropping corrupt queued capsule ${entry.capsuleId}")
+                SdkLog.w("dropping corrupt queued $noun ${entry.capsuleId}")
                 synchronized(lock) { Files.deleteQuietly(entry.file) }
                 continue
             }
@@ -149,9 +154,5 @@ class UploadOutbox(
     /** Stops uploading after the current file; later enqueues are refused. */
     fun close() {
         closed = true
-    }
-
-    private companion object {
-        val NAME = Regex("^(?:(\\d+)_)?([A-Za-z0-9-]{1,100})\\.bugcapsule$")
     }
 }

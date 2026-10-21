@@ -29,6 +29,21 @@ import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.RuntimeInfo
 import dev.bugcapsule.android.core.SessionInfo
+import dev.bugcapsule.android.monitoring.AnrWatchdog
+import dev.bugcapsule.android.monitoring.AppIdentity
+import dev.bugcapsule.android.monitoring.DeviceInfo
+import dev.bugcapsule.android.monitoring.ExceptionMapper
+import dev.bugcapsule.android.monitoring.Hint
+import dev.bugcapsule.android.monitoring.HttpSpanHandle
+import dev.bugcapsule.android.monitoring.Level
+import dev.bugcapsule.android.monitoring.Monitoring
+import dev.bugcapsule.android.monitoring.MonitoringEnvironment
+import dev.bugcapsule.android.monitoring.NativeCrashRecord
+import dev.bugcapsule.android.monitoring.NativeCrashes
+import dev.bugcapsule.android.monitoring.ScreenTracer
+import dev.bugcapsule.android.monitoring.ElfBuildId
+import dev.bugcapsule.android.feedback.BugCapsuleFeedbackDialog
+import dev.bugcapsule.android.feedback.ShakeDetector
 import dev.bugcapsule.android.replay.BugCapsuleReplay
 import dev.bugcapsule.android.replay.ReplayEngine
 import dev.bugcapsule.android.storage.EarlyRestore
@@ -48,6 +63,8 @@ class BugCapsuleTestOverrides @JvmOverloads constructor(
     val storageDir: File? = null,
     val transport: Transport? = null,
     val random: Random? = null,
+    /** Start the ANR watchdog and native crash handler (off in tests by default). */
+    val monitoringThreads: Boolean = false,
 )
 
 internal const val SDK_NAME = "bugcapsule-android"
@@ -128,6 +145,23 @@ internal class Runtime(
     private var checkpointTask: Runnable? = null
     private var capture: AndroidCapture? = null
 
+    /** Monitoring (monitoring-v1): null in replay, when disabled, or turned off by remote config at launch. */
+    @Volatile
+    var monitoring: Monitoring? = null
+        private set
+    private var screenTracer: ScreenTracer? = null
+    private var anrWatchdog: AnrWatchdog? = null
+    private var shakeDetector: ShakeDetector? = null
+
+    @Volatile
+    private var foreground = false
+
+    @Volatile
+    private var resumedActivity: java.lang.ref.WeakReference<android.app.Activity>? = null
+
+    /** Event of each failure signature, linked from capsules written later (manual capture). */
+    private val failureEvents = ConcurrentHashMap<String, Monitoring.Captured>()
+
     private val states = ConcurrentHashMap<String, Pair<StateSerializer, StateRestorer?>>()
     private val restoredStates = Collections.synchronizedSet(HashSet<String>())
     private val warned = Collections.synchronizedSet(HashSet<String>())
@@ -141,6 +175,7 @@ internal class Runtime(
     override val mode: CaptureMode
         get() = config.mode ?: if (host.isDebuggable) CaptureMode.DEBUG else CaptureMode.PRODUCTION
     override val isRecording: Boolean get() = recording
+    override val isObserving: Boolean get() = recording || monitoring?.active == true
     override val isReplaying: Boolean get() = engine != null
     override val redactor: Redactor get() = currentRedactor
     override val captureNetworkBodies: Boolean get() = captureBodies
@@ -182,13 +217,33 @@ internal class Runtime(
         frameworks.add(name)
     }
 
+    /**
+     * Records an event in the flight recorder (when recording) and derives
+     * a monitoring breadcrumb from it (when monitoring is on): integrations
+     * record once, capsules and events both see it.
+     */
     override fun record(type: String, data: Map<String, Any?>) {
-        if (!recording) return
+        val mon = monitoring?.takeIf { it.active }
+        if (!recording && mon == null) return
         try {
             val clean = sanitizeEvent(type, data) ?: return
-            synchronized(lock) { recorder?.add(now(), type, clean) }
+            if (recording) synchronized(lock) { recorder?.add(now(), type, clean) }
+            mon?.onRecorded(type, clean)
+            if (type == EventTypes.ACTION && mon != null && config.enableUserInteractionTracing) {
+                (clean["id"] as? String)?.let { id -> host.postToMain { screenTracer?.onAction(id) } }
+            }
         } catch (e: Throwable) {
             warnOnce("dropping a $type event: $e")
+        }
+    }
+
+    override fun startHttpSpan(method: String, url: String): HttpSpanHandle? {
+        if (engine != null) return null
+        val mon = monitoring?.takeIf { it.active } ?: return null
+        return try {
+            mon.startHttpSpan(method, url)
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -243,6 +298,7 @@ internal class Runtime(
             schedule(0) {
                 remote?.refresh()
                 flushOutbox(null)
+                monitoring?.flushNow()
             }
         }
     }
@@ -297,7 +353,14 @@ internal class Runtime(
                 SdkLog.w("${integration.name} setup failed: $e")
             }
         }
+        try {
+            startMonitoring(s, t, cached)
+        } catch (e: Throwable) {
+            SdkLog.w("monitoring setup failed; the app runs without it: $e")
+            monitoring = null
+        }
         capture = AndroidCapture(this, host).also { it.install() }
+        if (monitoring != null) installErrorHandler()
         if (record) {
             val launch = Checkpoint(
                 kind = CheckpointKind.LAUNCH,
@@ -312,6 +375,163 @@ internal class Runtime(
             recording = true
             installErrorHandler()
             schedulePeriodicCheckpoint()
+        }
+    }
+
+    // ----------------------------------------------------------- monitoring
+
+    private val monitoringEnv = object : MonitoringEnvironment {
+        override val config: BugCapsuleConfig get() = this@Runtime.config
+        override val mode: CaptureMode get() = this@Runtime.mode
+        override val redactor: Redactor get() = currentRedactor
+        override val app: AppIdentity by lazy {
+            val pkg = host.packageInfo()
+            AppIdentity(config.appId ?: pkg.id, config.appVersion ?: pkg.version, config.appBuild ?: pkg.build, config.appName ?: pkg.name)
+        }
+        override val dir: File get() = File(store!!.root, "monitoring")
+        override val transport: Transport? get() = this@Runtime.transport
+        override val remote: RemoteCaptureConfig? get() = this@Runtime.remote?.current
+        override fun ensureConfigFresh() {
+            this@Runtime.remote?.ensureFresh()
+        }
+        override val uploadsAllowed: Boolean get() = this@Runtime.uploadsAllowed
+        override fun onCaptureDisabled() {
+            schedule(0) { this@Runtime.remote?.refresh() }
+        }
+        override fun schedule(delayMs: Long, task: Runnable): Cancellable = try {
+            val f = executor.schedule(guarded(task), delayMs, TimeUnit.MILLISECONDS)
+            Cancellable { f.cancel(false) }
+        } catch (_: Exception) {
+            Cancellable {}
+        }
+        override fun <T> submit(task: Callable<T>): Future<T> = executor.submit(task)
+        override val isForeground: Boolean get() = foreground
+        private val device by lazy { DeviceInfo(host.context, app) }
+        override fun deviceContexts(): Map<String, Map<String, Any?>> = device.contexts()
+        override val debugImages: List<Map<String, Any?>> by lazy {
+            val id = config.proguardUuid ?: DeviceInfo.proguardUuid(host.context)
+            if (id == null) emptyList() else listOf(linkedMapOf("type" to "proguard", "debugId" to id))
+        }
+        override val random: Random get() = samplingRandom
+    }
+
+    /**
+     * Monitoring runs in every capture session (sampled for capsules or
+     * not), unless turned off locally or by the cached remote config.
+     */
+    private fun startMonitoring(s: CapsuleStore, t: Transport?, cached: RemoteCaptureConfig?) {
+        if (!config.monitoring) return
+        if (cached != null && (!cached.enabled || !cached.monitoringEnabled)) return
+        val mon = Monitoring(monitoringEnv)
+        monitoring = mon
+        val threads = overrides?.monitoringThreads ?: true
+
+        // What the previous process left behind: native crash records, an unfinished session.
+        val native = NativeCrashes(File(s.root, "native"))
+        var crashedAt: Long? = null
+        for (file in native.pending()) {
+            try {
+                val record = NativeCrashRecord.parse(file.readText())
+                if (record != null) {
+                    val ctx = native.previousContext()
+                    crashedAt = maxOf(crashedAt ?: 0L, record.timestampMs ?: file.lastModified())
+                    mon.captureRaw(
+                        Level.FATAL, Hint(null, "signal", null), fatal = false,
+                        timestampMs = record.timestampMs,
+                        releaseOverride = ctx["release"] as? String,
+                        environmentOverride = ctx["environment"] as? String,
+                        countInSession = false,
+                    ) { ev -> NativeCrashes.fill(ev, record, monitoringEnv.app.id, ElfBuildId::forPath) }
+                }
+            } catch (e: Throwable) {
+                SdkLog.w("could not read native crash record ${file.name}: $e")
+            }
+            native.delete(file)
+        }
+        mon.sessions?.recoverPrevious(crashedAt)
+        if (threads && config.enableNativeCrashHandling) native.install(mon.release, mon.environment)
+
+        if (threads && config.enableAnrTracking) {
+            anrWatchdog = AnrWatchdog(
+                timeoutMs = config.anrTimeoutMs,
+                postToMain = host::postToMain,
+                mainThread = android.os.Looper.getMainLooper().thread,
+                isForeground = { foreground },
+                onAnr = { stack, blocked ->
+                    mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false) { ev ->
+                        AnrWatchdog.fill(ev, stack, blocked, config.anrTimeoutMs, android.os.Looper.getMainLooper().thread, mon.inApp)
+                    }
+                },
+            ).also { it.start() }
+        }
+        if (config.enableActivityTracing || config.enableAppStartTracking) {
+            screenTracer = ScreenTracer(mon, config, android.os.SystemClock.uptimeMillis()).also {
+                host.application.registerActivityLifecycleCallbacks(it)
+            }
+        }
+        if (config.enableShakeToReport) {
+            shakeDetector = ShakeDetector(Runnable {
+                host.postToMain {
+                    val activity = resumedActivity?.get() ?: return@postToMain
+                    try {
+                        BugCapsuleFeedbackDialog.show(activity, eventId = mon.lastEventId)
+                    } catch (e: Throwable) {
+                        SdkLog.once("feedback dialog failed: $e")
+                    }
+                }
+            })
+        }
+    }
+
+    fun onActivityResumed(activity: android.app.Activity) {
+        resumedActivity = java.lang.ref.WeakReference(activity)
+    }
+
+    fun startScreen(name: String, op: String, view: android.view.View?) = screenTracer?.startScreen(name, op, view)
+
+    fun reportFullyDrawn() {
+        screenTracer?.reportFullyDrawn()
+    }
+
+    fun captureFeedback(message: String, name: String?, email: String?, eventId: String?, captureCapsule: Boolean?): String? {
+        val mon = monitoring?.takeIf { it.active } ?: return null
+        val withCapsule = recording && (captureCapsule ?: config.captureCapsuleWithFeedback ?: (mode == CaptureMode.QA))
+        val capsuleId = if (withCapsule) Ids.uuidV4() else null
+        val id = mon.captureFeedback(message, name, email, eventId, capsuleId, null) ?: return null
+        if (capsuleId != null) {
+            val link = linkedMapOf<String, Any?>()
+            if (eventId != null) link["eventId"] = eventId
+            link["feedbackId"] = id
+            link["release"] = mon.release
+            link["environment"] = mon.environment
+            submit { writeCapsule(lastFailure, mapOf("feedbackId" to id), capsuleId = capsuleId, monitoringLink = link) }
+        }
+        return id
+    }
+
+    /** Sends the failure's event; links [capsuleId] when a capsule will be written for it. */
+    private fun failureEvent(mon: Monitoring, failure: FailureRecord, error: Throwable?, fatal: Boolean, capsuleId: String?): Monitoring.Captured? {
+        val captured = if (error != null) {
+            mon.captureException(
+                error,
+                if (fatal) ExceptionMapper.Mechanism("uncaught", false) else ExceptionMapper.Mechanism("manual", true),
+                fatal = fatal,
+                capsuleId = capsuleId,
+            )
+        } else {
+            mon.captureAssertion(failure.assertionId ?: failure.type, failure.message, capsuleId)
+        }
+        if (captured != null) failureEvents[failure.signature] = captured
+        return captured
+    }
+
+    /** `manifest.monitoring` of a capsule written for the failure with [event]. */
+    private fun monitoringLink(event: Monitoring.Captured?, mon: Monitoring?): Map<String, Any?>? {
+        if (event == null || mon == null) return null
+        return linkedMapOf<String, Any?>("eventId" to event.eventId).also {
+            if (event.traceId != null) it["traceId"] = event.traceId
+            it["release"] = mon.release
+            it["environment"] = mon.environment
         }
     }
 
@@ -373,30 +593,43 @@ internal class Runtime(
     private fun onError(error: Throwable, fatal: Boolean) {
         try {
             if (config.ignoreError?.ignore(error) == true) return
-            handleFailure(FailureRecord.exception(error, now(), currentRedactor::scrubText), fatal)
+            handleFailure(FailureRecord.exception(error, now(), currentRedactor::scrubText), fatal, error)
         } catch (e: Throwable) {
             warnOnce("could not record failure: $e")
         }
     }
 
-    fun handleFailure(failure: FailureRecord, fatal: Boolean = false) {
+    /**
+     * A failure: recorded, sent as a monitoring event, and captured as a
+     * capsule (deduplicated by signature). When both happen the event
+     * carries `capsuleId` and the capsule `manifest.monitoring.eventId`.
+     */
+    fun handleFailure(failure: FailureRecord, fatal: Boolean = false, error: Throwable? = null) {
         val replaying = engine
         if (replaying != null) {
             replaying.onFailure(failure)
             return
         }
-        if (!recording) return
+        val mon = monitoring?.takeIf { it.active }
+        if (!recording) {
+            if (mon != null) failureEvent(mon, failure, error, fatal, null)
+            return
+        }
         val event = failure.toJson().toMutableMap().also { it.remove("stack") }
         record(EventTypes.FAILURE, event)
         lastFailure = failure
-        if (!seenSignatures.add(failure.signature)) return
-        if (!config.autoCaptureOnFailure) return
-        if (capsulesWritten.get() >= config.maxCapsulesPerSession) return
-        if (!capturedSignatures.add(failure.signature)) return
+        val capture = seenSignatures.add(failure.signature) &&
+            config.autoCaptureOnFailure &&
+            capsulesWritten.get() < config.maxCapsulesPerSession &&
+            capturedSignatures.add(failure.signature)
+        val capsuleId = if (capture) Ids.uuidV4() else null
+        val captured = mon?.let { failureEvent(it, failure, error, fatal, capsuleId) }
+        if (!capture || capsuleId == null) return
+        val link = monitoringLink(captured, mon)
         if (fatal) {
             // The process is about to die: persist synchronously, upload next launch.
             try {
-                val r = writeCapsule(failure, emptyMap(), crash = true)
+                val r = writeCapsule(failure, emptyMap(), crash = true, capsuleId = capsuleId, monitoringLink = link)
                 if (r != null) SdkLog.w("crash captured ${r.capsuleId} (${r.eligibility.status.wire}) → ${r.file.path}; uploads on next launch")
             } catch (e: Throwable) {
                 SdkLog.w("crash capture failed: $e")
@@ -405,7 +638,7 @@ internal class Runtime(
         }
         // Let the failure settle (follow-up events) before writing.
         schedule(300) {
-            val r = writeCapsule(failure, emptyMap(), crash = false)
+            val r = writeCapsule(failure, emptyMap(), crash = false, capsuleId = capsuleId, monitoringLink = link)
             if (r != null) SdkLog.i("captured ${r.capsuleId} (${r.eligibility.status.wire}) → ${r.file.path}")
         }
     }
@@ -421,11 +654,28 @@ internal class Runtime(
 
     fun onLifecycle(state: String) {
         record(EventTypes.LIFECYCLE, mapOf("state" to state))
+        val mon = monitoring
+        if (mon != null) {
+            when (state) {
+                "resumed" -> {
+                    foreground = true
+                    if (mon.active && mon.sessionTrackingAllowed) mon.sessions?.onForeground()
+                    shakeDetector?.start(host.context)
+                }
+                "paused" -> {
+                    foreground = false
+                    mon.sessions?.onBackground()
+                    shakeDetector?.stop()
+                    schedule(0) { mon.flushNow() }
+                }
+            }
+        }
         val controller = remote ?: return
         when (state) {
             "resumed" -> schedule(0) {
                 controller.onResumed()
                 flushOutbox(null)
+                monitoring?.flushNow()
             }
             "paused" -> schedule(0) { controller.onPaused() }
         }
@@ -528,7 +778,13 @@ internal class Runtime(
 
     // -------------------------------------------------------------- capsule
 
-    fun writeCapsule(failure: FailureRecord?, labels: Map<String, String>, crash: Boolean = false): CaptureResult? {
+    fun writeCapsule(
+        failure: FailureRecord?,
+        labels: Map<String, String>,
+        crash: Boolean = false,
+        capsuleId: String = Ids.uuidV4(),
+        monitoringLink: Map<String, Any?>? = null,
+    ): CaptureResult? {
         if (!recording) return null
         for (integration in integrations) {
             try {
@@ -587,7 +843,7 @@ internal class Runtime(
         }
         val capsule = Capsule(
             manifest = CapsuleManifest(
-                capsuleId = Ids.uuidV4(),
+                capsuleId = capsuleId,
                 createdAtMs = System.currentTimeMillis(),
                 mode = mode,
                 app = AppInfo(
@@ -622,6 +878,7 @@ internal class Runtime(
                 redactionHeaders = currentRedactor.extraHeaders,
                 runtime = RuntimeInfo("android", host.apiLevel().toString(), "kotlin", frameworks.toList()),
                 capabilities = capabilities,
+                monitoring = monitoringLink ?: failure?.let { monitoringLink(failureEvents[it.signature], monitoring) },
             ),
             checkpoint = window.checkpoint.shift(anchor),
             events = events,
@@ -717,6 +974,7 @@ internal class Runtime(
      */
     private fun applyRemote(previous: RemoteCaptureConfig?, next: RemoteCaptureConfig, keyRejected: Boolean) {
         maxCapsuleBytes = next.maxCapsuleBytes
+        if (keyRejected) monitoring?.disable(purge = false) else monitoring?.onRemoteConfig(next)
         if (keyRejected) {
             if (recording) SdkLog.w("capture stopped: ingest key rejected")
             stopRecording()
@@ -874,6 +1132,10 @@ internal class Runtime(
 
     fun dispose() {
         disposed = true
+        anrWatchdog?.shutdown()
+        shakeDetector?.stop()
+        screenTracer?.let { host.application.unregisterActivityLifecycleCallbacks(it) }
+        monitoring?.disable(purge = false)
         stopRecording()
         remote?.dispose()
         capture?.uninstall()

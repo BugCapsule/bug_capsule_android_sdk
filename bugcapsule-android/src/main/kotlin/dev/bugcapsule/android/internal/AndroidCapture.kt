@@ -71,6 +71,7 @@ internal class AndroidCapture(private val runtime: Runtime, private val host: Ho
     override fun onActivityResumed(activity: Activity) = guard {
         wrap(activity) // a callback replaced after onCreate is wrapped again
         host.currentWindow = WeakReference(activity.window)
+        runtime.onActivityResumed(activity)
         if (!anchored) anchorOnFirstDraw(activity)
         resumed++
         if (resumed == 1) {
@@ -173,7 +174,7 @@ internal class RecordingWindowCallback(
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (runtime.isRecording && event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0 &&
+        if (runtime.isObserving && event.keyCode == KeyEvent.KEYCODE_BACK && event.repeatCount == 0 &&
             (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP)
         ) {
             try {
