@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "capsuleId": "a5d64e6c-c81e-4abc-962d-8f1c90c195ac",
+      "name": "race: recommendations before profile",
+      "file": "bugcapsule/regressions/a5d64e6c-c81e-4abc-962d-8f1c90c195ac.bugcapsule",
+      "signature": "exception:IllegalStateException:Recommendations arrived before the profile",
+      "status": "active",
+      "addedAt": "2026-10-21T13:19:10.767314Z",
+      "runtime": "android",
+      "lineage": {
+        "serverId": "c906c3d4-39d1-412c-ad18-aff73ac1ce0c",
+        "capturedGitSha": "05053ca7cc9985bab24ead6973954bf3c27cf38a"
+      },
+      "lastRun": {
+        "at": "2026-10-21T13:19:39.036363Z",
+        "result": "pass",
+        "attempts": 2,
+        "validAttempts": 2,
+        "reproductions": 0,
+        "gitSha": null
+      }
+    }
+  ]
+}
