@@ -61,7 +61,12 @@ class NativeCrashesTest {
         assertEquals(false, J.obj(value["mechanism"])!!["handled"])
         val frames = J.list(J.obj(value["stacktrace"])!!["frames"])!!.map { J.obj(it)!! }
         assertEquals("crashing frame last", "crash_here", frames.last()["function"])
-        assertEquals("0x7a1b2c3d4e", frames.last()["instructionAddr"])
+        assertEquals("crashing frame: exact PC", "0x7a1b2c3d4e", frames.last()["instructionAddr"])
+        assertEquals(
+            "callers: return address - 1",
+            listOf("0x7f00001233", "0x7a1b2c3eff"),
+            frames.dropLast(1).map { it["instructionAddr"] },
+        )
         assertEquals(true, frames.last()["inApp"])
         assertEquals(false, frames.first()["inApp"])
         assertEquals("unresolvable image keeps its load address", "0x7f00000000", frames.first()["imageAddr"])

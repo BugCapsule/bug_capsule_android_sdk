@@ -230,7 +230,8 @@ What is sent, and how:
   `check` / `fail` failures, `captureException` / `captureMessage`, **ANRs**
   (watchdog: main thread blocked 5 s in the foreground, mechanism `anr`, main
   thread stack in `threads`) and **native crashes** with `bugcapsule-ndk`
-  (mechanism `signal`, frames with `instructionAddr`, `elf` debug images with
+  (mechanism `signal`, frames with `instructionAddr`: the exact PC for the
+  crashing frame, return address − 1 for callers; `elf` debug images with
   GNU build ids, the crashed process's release). Exception chains are
   innermost cause first, frames oldest first; `inApp` from the app id or
   `inAppIncludes`/`inAppExcludes`; `debugImages` carries the `proguard` UUID
