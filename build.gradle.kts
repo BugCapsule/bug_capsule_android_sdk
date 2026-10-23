@@ -80,8 +80,8 @@ subprojects {
                             description.set(project.description ?: project.name)
                             licenses {
                                 license {
-                                    name.set("Apache-2.0")
-                                    url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                                    name.set("Bug Capsule Proprietary License")
+                                    url.set("https://github.com/BugCapsule/bug_capsule_android_sdk/blob/main/LICENSE")
                                 }
                             }
                         }
