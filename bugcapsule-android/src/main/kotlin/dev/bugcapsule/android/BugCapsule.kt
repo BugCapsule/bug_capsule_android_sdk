@@ -29,7 +29,7 @@ import dev.bugcapsule.android.monitoring.Transaction
 import dev.bugcapsule.android.monitoring.User
 import java.io.File
 import java.util.Random
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.FutureTask
 import java.util.concurrent.Future
 
 /** Result of writing a capsule. [upload] is null when no backend is configured. */
@@ -222,7 +222,7 @@ object BugCapsule {
     @JvmStatic
     @JvmOverloads
     fun capture(note: String? = null): Future<CaptureResult?> {
-        val rt = runtime ?: return CompletableFuture.completedFuture(null)
+        val rt = runtime ?: return FutureTask<CaptureResult?> { null }.apply { run() }
         return rt.submit {
             rt.writeCapsule(rt.lastFailure, if (note != null) mapOf("note" to note) else emptyMap())
         }
@@ -235,14 +235,14 @@ object BugCapsule {
     /** Fetches the remote capture config now (it is otherwise refreshed after its TTL and on foreground). */
     @JvmStatic
     fun refreshRemoteConfig(): Future<*> {
-        val rt = runtime ?: return CompletableFuture.completedFuture(null)
+        val rt = runtime ?: return FutureTask<CaptureResult?> { null }.apply { run() }
         return rt.submit { rt.remote?.refresh() }
     }
 
     /** Uploads queued capsules now, if the remote config allows it. */
     @JvmStatic
     fun flushUploads(): Future<*> {
-        val rt = runtime ?: return CompletableFuture.completedFuture(null)
+        val rt = runtime ?: return FutureTask<CaptureResult?> { null }.apply { run() }
         return rt.submit { rt.flushOutbox(null) }
     }
 

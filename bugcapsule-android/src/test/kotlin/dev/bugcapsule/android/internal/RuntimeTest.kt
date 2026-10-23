@@ -47,6 +47,7 @@ class FakeTransport : Transport {
 }
 
 @RunWith(RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [23, 24, 25, 26, 35])
 class RuntimeTest {
     @get:Rule
     val tmp = TemporaryFolder()
@@ -63,6 +64,13 @@ class RuntimeTest {
     fun tearDown() {
         BugCapsule.resetForTest()
         BugCapsule.testOverrides = null
+    }
+
+    @Test
+    fun callsBeforeInitializationCompleteOnMinimumSdk() {
+        assertEquals(null, BugCapsule.capture().get(1, TimeUnit.SECONDS))
+        assertEquals(null, BugCapsule.refreshRemoteConfig().get(1, TimeUnit.SECONDS))
+        assertEquals(null, BugCapsule.flushUploads().get(1, TimeUnit.SECONDS))
     }
 
     private fun start(withBackend: Boolean, vararg integrations: dev.bugcapsule.android.BugCapsuleIntegration) {

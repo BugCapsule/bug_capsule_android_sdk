@@ -35,7 +35,7 @@ android {
         buildConfigField("String", "BUGCAPSULE_URL", quoted(setting("bugcapsuleBackendUrl", "BUGCAPSULE_DEMO_BACKEND_URL", "http://10.0.2.2:8787")))
         buildConfigField("String", "BUGCAPSULE_INGEST_KEY", quoted(setting("bugcapsuleIngestKey", "BUGCAPSULE_INGEST_KEY")))
         // Temporary, isolated fix toggle for verification: -PbugcapsuleDemoFix=race
-        // (or BUGCAPSULE_DEMO_FIX=race). Comma-separated: race, price, legacy.
+        // (or BUGCAPSULE_DEMO_FIX=race). Comma-separated: race, price, legacy, coupon.
         buildConfigField("String", "DEMO_FIX", quoted(setting("bugcapsuleDemoFix", "BUGCAPSULE_DEMO_FIX")))
     }
 

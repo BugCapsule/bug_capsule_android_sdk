@@ -762,7 +762,15 @@ internal class Runtime(
     }
 
     fun unregisterState(key: String, serializer: StateSerializer? = null) {
-        if (serializer == null) states.remove(key) else states.computeIfPresent(key) { _, v -> if (v.first === serializer) null else v }
+        if (serializer == null) {
+            states.remove(key)
+        } else {
+            // Conditional removal preserves a concurrently registered replacement.
+            while (true) {
+                val entry = states[key] ?: break
+                if (entry.first !== serializer || states.remove(key, entry)) break
+            }
+        }
     }
 
     fun reportState(key: String) {
