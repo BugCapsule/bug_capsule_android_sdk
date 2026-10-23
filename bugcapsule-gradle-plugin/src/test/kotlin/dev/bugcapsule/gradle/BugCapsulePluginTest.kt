@@ -12,7 +12,7 @@ class BugCapsulePluginTest {
     @Test
     fun `applies to a plain project and registers the extension`() {
         val project = ProjectBuilder.builder().build()
-        project.pluginManager.apply("dev.bugcapsule.gradle")
+        project.pluginManager.apply("io.github.bugcapsule.gradle")
 
         val extension = project.extensions.findByName("bugcapsule")
         assertNotNull(extension)
@@ -41,7 +41,7 @@ class BugCapsulePluginTest {
     fun `applies alongside the java plugin`() {
         val project = ProjectBuilder.builder().build()
         project.pluginManager.apply("java")
-        project.pluginManager.apply("dev.bugcapsule.gradle")
+        project.pluginManager.apply("io.github.bugcapsule.gradle")
         assertNotNull(project.extensions.findByType(BugCapsuleExtension::class.java))
     }
 }

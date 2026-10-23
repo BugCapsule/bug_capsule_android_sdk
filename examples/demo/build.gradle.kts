@@ -4,7 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     // Embeds the R8 mapping UUID and uploads mapping.txt (minified variants only;
     // url / secret key from -PbugcapsuleUrl / BUGCAPSULE_URL and BUGCAPSULE_SECRET_KEY).
-    id("dev.bugcapsule.gradle")
+    id("io.github.bugcapsule.gradle")
 }
 
 /** A Gradle property (`-Pname=...`) or, failing that, an environment variable. */

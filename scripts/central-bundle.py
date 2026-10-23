@@ -4,6 +4,7 @@ import argparse, hashlib, shutil, subprocess, zipfile
 from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--sign-key', help='Existing local GPG key ID; required for upload-ready bundle')
+parser.add_argument('--passphrase-file', type=Path, help='Private local passphrase file for noninteractive GPG signing; never committed')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 subprocess.run([str(root / 'gradlew'), 'lintRelease', 'publishAll'], cwd=root, check=True)
@@ -13,7 +14,8 @@ repo = root / 'build/repo'
 stage = root / 'build/central-bundle'
 if stage.exists(): shutil.rmtree(stage)
 stage.mkdir()
-poms = list(repo.rglob(f'*-{version}.pom'))
+namespace = repo / props['GROUP'].replace('.', '/')
+poms = list(namespace.rglob(f'*-{version}.pom'))
 assert poms, 'No Maven publications found'
 for pom in poms:
     directory = pom.parent
@@ -28,7 +30,7 @@ for pom in poms:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         if args.sign_key:
-            subprocess.run(['gpg', '--batch', '--yes', '--armor', '--detach-sign', '--local-user', args.sign_key, str(target)], check=True)
+            subprocess.run(['gpg', '--batch', '--yes', *(['--pinentry-mode', 'loopback', '--passphrase-file', str(args.passphrase_file)] if args.passphrase_file else []), '--armor', '--detach-sign', '--local-user', args.sign_key, str(target)], check=True)
 for item in list(stage.rglob('*')):
     if not item.is_file(): continue
     for algorithm in ('md5', 'sha1', 'sha256'):

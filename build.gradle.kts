@@ -72,11 +72,11 @@ subprojects {
                         version = sdkVersion
                         pom {
                             name.set(project.name)
-                            url.set("https://github.com/draz26648/bug_capsule_android_sdk")
+                            url.set("https://github.com/BugCapsule/bug_capsule_android_sdk")
                             scm {
-                                url.set("https://github.com/draz26648/bug_capsule_android_sdk")
-                                connection.set("scm:git:https://github.com/draz26648/bug_capsule_android_sdk.git")
-                                developerConnection.set("scm:git:ssh://git@github.com/draz26648/bug_capsule_android_sdk.git")
+                                url.set("https://github.com/BugCapsule/bug_capsule_android_sdk")
+                                connection.set("scm:git:https://github.com/BugCapsule/bug_capsule_android_sdk.git")
+                                developerConnection.set("scm:git:ssh://git@github.com/BugCapsule/bug_capsule_android_sdk.git")
                             }
                             developers {
                                 developer {
