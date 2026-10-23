@@ -21,7 +21,9 @@ object CapsuleLimits {
  * valid, otherwise `<json path> <reason>`.
  */
 object CapsuleValidator {
-    private class Invalid(message: String) : RuntimeException(message, null, false, false)
+    private class Invalid(message: String) : RuntimeException(message) {
+        override fun fillInStackTrace(): Throwable = this
+    }
 
     private const val MAX_SAFE_INT = 9007199254740991L
 

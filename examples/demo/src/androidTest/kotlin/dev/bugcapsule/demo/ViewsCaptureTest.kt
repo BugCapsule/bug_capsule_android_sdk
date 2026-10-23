@@ -33,7 +33,27 @@ class ViewsCaptureTest {
             // The fake server returns random carts: SAVE100 only breaks carts under 100.
             for (attempt in 1..15) {
                 onView(withId(R.id.open_cart)).perform(click())
-                onView(withId(R.id.cart_status)).check(matches(withText(containsString("ready"))))
+                lateinit var status: android.widget.TextView
+                scenario.onActivity { status = it.findViewById(R.id.cart_status) }
+                val ready = object : androidx.test.espresso.IdlingResource, android.text.TextWatcher {
+                    var callback: androidx.test.espresso.IdlingResource.ResourceCallback? = null
+                    override fun getName() = "cart response ready"
+                    override fun isIdleNow() = status.text.contains("ready")
+                    override fun registerIdleTransitionCallback(cb: androidx.test.espresso.IdlingResource.ResourceCallback) { callback = cb }
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        if (isIdleNow) callback?.onTransitionToIdle()
+                    }
+                    override fun afterTextChanged(s: android.text.Editable?) {}
+                }
+                scenario.onActivity { status.addTextChangedListener(ready) }
+                androidx.test.espresso.IdlingRegistry.getInstance().register(ready)
+                try {
+                    onView(withId(R.id.cart_status)).check(matches(withText(containsString("ready"))))
+                } finally {
+                    androidx.test.espresso.IdlingRegistry.getInstance().unregister(ready)
+                    scenario.onActivity { status.removeTextChangedListener(ready) }
+                }
                 var total = 0.0
                 scenario.onActivity { a ->
                     total = a.findViewById<android.widget.TextView>(R.id.total).text.toString()

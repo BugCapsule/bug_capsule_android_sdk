@@ -25,7 +25,7 @@ data class CartState(
         get() = when (coupon) {
             "SAVE10" -> subtotal * 0.1
             // A fixed discount larger than the cart makes the total negative.
-            "SAVE100" -> 100.0
+            "SAVE100" -> if ("coupon" in DemoFixes.active) minOf(100.0, subtotal) else 100.0
             else -> 0.0
         }
     val total: Double get() = subtotal - discount

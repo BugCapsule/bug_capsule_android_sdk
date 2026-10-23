@@ -47,10 +47,11 @@ subprojects {
             publishing {
                 singleVariant("release") {
                     withSourcesJar()
+                    withJavadocJar()
                 }
             }
             lint {
-                abortOnError = false
+                abortOnError = true
             }
         }
         afterEvaluate {
@@ -63,6 +64,19 @@ subprojects {
                         version = sdkVersion
                         pom {
                             name.set(project.name)
+                            url.set("https://github.com/draz26648/bug_capsule_android_sdk")
+                            scm {
+                                url.set("https://github.com/draz26648/bug_capsule_android_sdk")
+                                connection.set("scm:git:https://github.com/draz26648/bug_capsule_android_sdk.git")
+                                developerConnection.set("scm:git:ssh://git@github.com/draz26648/bug_capsule_android_sdk.git")
+                            }
+                            developers {
+                                developer {
+                                    id.set("draz26648")
+                                    name.set("BugCapsule maintainers")
+                                    url.set("https://github.com/draz26648")
+                                }
+                            }
                             description.set(project.description ?: project.name)
                             licenses {
                                 license {
@@ -92,6 +106,7 @@ tasks.register("test") {
 tasks.register("publishAll") {
     group = "publishing"
     description = "Publishes every SDK artifact to build/repo (a local Maven file repository)."
+    dependsOn(gradle.includedBuild("bugcapsule-gradle-plugin").task(":publishAllPublicationsToLocalRepository"))
     dependsOn(
         subprojects.filter { it.name.startsWith("bugcapsule-") }
             .map { "${it.path}:publishReleasePublicationToLocalRepository" },

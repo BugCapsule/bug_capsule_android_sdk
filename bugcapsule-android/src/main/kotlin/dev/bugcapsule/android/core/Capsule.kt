@@ -364,7 +364,8 @@ data class Capsule(
 
 /** ISO-8601 in UTC with milliseconds, like Dart's `toUtc().toIso8601String()`. */
 object Iso8601 {
-    private val formatter = ThreadLocal.withInitial {
+    private val formatter = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
     }
     private val pattern = Regex(

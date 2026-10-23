@@ -123,7 +123,7 @@ object DartText {
 
     private fun isTrimmable(c: Char): Boolean = when (c) {
         '\t', '\n', '\u000B', '\u000C', '\r', ' ', '\u0085', ' ', ' ',
-        ' ', ' ', ' ', ' ', '　', '﻿',
+        ' ', ' ', ' ', ' ', '　', '\uFEFF',
         -> true
         else -> c in ' '..' '
     }

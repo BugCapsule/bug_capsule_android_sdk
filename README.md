@@ -519,3 +519,9 @@ The vendored `spec-fixtures/` must equal `../bug_capsule_flutter_sdk/spec/fixtur
 3. Run the unit tests, `:demo:connectedDebugAndroidTest`, and the CLI E2E
    (`bugcapsule run/verify/regress`) on an emulator.
 4. Publishing to Maven Central (signing, staging) is intentionally not wired up.
+
+## Release validation (2026-10-23)
+
+This repository is licensed under Apache-2.0 (see LICENSE). Local candidates are
+prepared without publishing. See `docs/release-readiness.md` for the current
+validation evidence and remaining release gates.
