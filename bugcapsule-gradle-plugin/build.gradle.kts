@@ -8,10 +8,10 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.2.20"
 }
 
-group = "dev.bugcapsule"
 val sdkProperties = Properties().apply {
     file("../gradle.properties").inputStream().use { load(it) }
 }
+group = sdkProperties.getProperty("GROUP")
 version = sdkProperties.getProperty("VERSION_NAME")
 
 dependencies {
@@ -46,7 +46,7 @@ tasks.withType<JavaCompile>().configureEach {
 gradlePlugin {
     plugins {
         create("bugcapsule") {
-            id = "dev.bugcapsule.gradle"
+            id = "io.github.bugcapsule.gradle"
             implementationClass = "dev.bugcapsule.gradle.BugCapsulePlugin"
             displayName = "BugCapsule Gradle plugin"
             description = "Embeds a ProGuard/R8 mapping id in Android APKs and uploads mapping.txt to BugCapsule."
@@ -67,11 +67,11 @@ publishing {
         pom {
             name.set("BugCapsule Gradle plugin")
             description.set("ProGuard/R8 mapping IDs and upload for BugCapsule")
-            url.set("https://github.com/draz26648/bug_capsule_android_sdk")
+            url.set("https://github.com/BugCapsule/bug_capsule_android_sdk")
             licenses { license { name.set("Bug Capsule Proprietary License"); url.set("https://github.com/BugCapsule/bug_capsule_android_sdk/blob/main/LICENSE") } }
             scm {
-                url.set("https://github.com/draz26648/bug_capsule_android_sdk")
-                connection.set("scm:git:https://github.com/draz26648/bug_capsule_android_sdk.git")
+                url.set("https://github.com/BugCapsule/bug_capsule_android_sdk")
+                connection.set("scm:git:https://github.com/BugCapsule/bug_capsule_android_sdk.git")
             }
             developers { developer { id.set("draz26648"); name.set("BugCapsule maintainers") } }
         }
