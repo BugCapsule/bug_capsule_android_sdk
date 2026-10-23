@@ -11,7 +11,7 @@ a demo shop app. The capsule format and protocols are defined in
 `bug_capsule_flutter_sdk/spec/capsule-v1.md` and `spec/runtimes-v1.md`; the
 `bugcapsule` CLI (Dart) drives replay through `AndroidLauncher`.
 
-| Artifact (`dev.bugcapsule:…:0.4.0`) | What it is |
+| Artifact (`io.github.bugcapsule:…:0.4.1-beta.1`) | What it is |
 |---|---|
 | `bugcapsule-android` | Core: capsule model/codec/validator, recorder, redaction, request keys, remote config, outbox, capture (lifecycle, pointers, Back key, failures, crashes), replay engine, Views helpers, SharedPreferences and Preferences DataStore checkpoints, state serializers/restorers (incl. ViewModels) |
 | `bugcapsule-okhttp` | OkHttp capture and deterministic replay (Retrofit works through it); `http.client` spans and trace propagation |
@@ -19,7 +19,7 @@ a demo shop app. The capsule format and protocols are defined in
 | `bugcapsule-compose` | Compose helpers: semantic actions, tracked text, navigation effect, screen tracing, feedback sheet |
 | `bugcapsule-ndk` | NDK crash handler (signal handler writing a crash record, sent on next launch) |
 | `bugcapsule-sqlite` | SQLite / Room `db.sql.query` spans (`SupportSQLiteOpenHelper.Factory` wrapper) |
-| Gradle plugin `dev.bugcapsule.gradle` | R8/ProGuard mapping UUID in the APK + `mapping.txt` upload (`bugcapsule-gradle-plugin/`, an included build) |
+| Gradle plugin `io.github.bugcapsule.gradle` | R8/ProGuard mapping UUID in the APK + `mapping.txt` upload (`bugcapsule-gradle-plugin/`, an included build) |
 | `bugcapsule-android-replay` | **androidTest only**: `BugCapsuleReplayRunner` (an `AndroidJUnitRunner`) and `BugCapsuleReplayTest` |
 
 Requirements: minSdk 23, compileSdk 34+, Kotlin or Java 17 bytecode. Preferences
@@ -39,13 +39,13 @@ android {
     buildFeatures.buildConfig = true
 }
 dependencies {
-    implementation("dev.bugcapsule:bugcapsule-android:0.4.0")
-    implementation("dev.bugcapsule:bugcapsule-okhttp:0.4.0")
-    implementation("dev.bugcapsule:bugcapsule-navigation:0.4.0")
-    implementation("dev.bugcapsule:bugcapsule-compose:0.4.0")       // if you use Compose
-    implementation("dev.bugcapsule:bugcapsule-ndk:0.4.0")           // native crash events (optional)
-    implementation("dev.bugcapsule:bugcapsule-sqlite:0.4.0")        // SQLite / Room spans (optional)
-    androidTestImplementation("dev.bugcapsule:bugcapsule-android-replay:0.4.0")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.1")       // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.1")           // native crash events (optional)
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.1")        // SQLite / Room spans (optional)
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.1")
 }
 ```
 
@@ -298,7 +298,7 @@ ones until unstripped `.so` files are uploaded (`kind=elf`).
 
 ### Gradle plugin: ProGuard/R8 mapping upload
 
-The `dev.bugcapsule.gradle` plugin lets the backend deobfuscate stack traces
+The `io.github.bugcapsule.gradle` plugin lets the backend deobfuscate stack traces
 of minified builds. For every variant with `isMinifyEnabled = true` it writes
 `assets/bugcapsule-debug-meta.properties` (`proguardUuid=<uuid>`, derived from
 `mapping.txt`: the same mapping always gets the same id; the SDK sends it as a
@@ -307,7 +307,7 @@ of minified builds. For every variant with `isMinifyEnabled = true` it writes
 `assemble<Variant>` / `bundle<Variant>`.
 
 ```kotlin
-plugins { id("dev.bugcapsule.gradle") }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.1" }
 bugcapsule {
     url.set("https://bugcapsule.example.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
     // secretKey: -PbugcapsuleSecretKey or BUGCAPSULE_SECRET_KEY (a bcs_… key: CI secrets only, never in the app)
