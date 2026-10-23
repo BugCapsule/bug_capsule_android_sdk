@@ -82,3 +82,8 @@ tasks.named<Jar>("javadocJar") {
     from(file("../README.md"))
     from(file("../LICENSE"))
 }
+
+// Keep the proprietary terms inside every distributed plugin archive.
+tasks.withType<Jar>().configureEach {
+    from(file("../LICENSE")) { into("META-INF") }
+}

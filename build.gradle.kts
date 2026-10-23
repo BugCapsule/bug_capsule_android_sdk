@@ -23,6 +23,14 @@ subprojects {
         }
     }
     if (!name.startsWith("bugcapsule-")) return@subprojects
+    tasks.withType<org.gradle.api.tasks.bundling.Jar>().configureEach {
+        from(rootProject.file("LICENSE")) { into("META-INF") }
+    }
+    tasks.withType<org.gradle.api.tasks.bundling.Zip>().configureEach {
+        if (name == "bundleReleaseAar") {
+            from(rootProject.file("LICENSE")) { into("META-INF") }
+        }
+    }
     group = sdkGroup
     version = sdkVersion
     pluginManager.withPlugin("com.android.library") {
