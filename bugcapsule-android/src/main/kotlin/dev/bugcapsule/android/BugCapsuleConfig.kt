@@ -7,11 +7,14 @@ import dev.bugcapsule.android.monitoring.BeforeSendTransaction
 import dev.bugcapsule.android.monitoring.TracesSampler
 import java.util.regex.Pattern
 
-/** Where capsules are uploaded and remote capture config comes from. */
+/**
+ * Where capsules are uploaded and remote capture config comes from: the
+ * explicit (self-hosted / advanced) alternative to a connection token.
+ */
 class BugCapsuleBackendConfig(
-    /** e.g. `http://10.0.2.2:8787` from an emulator, `https://bugcapsule.example.com` hosted. */
+    /** e.g. `http://10.0.2.2:8787` from an emulator, `https://bugcapsule.example.com` self-hosted. */
     val url: String,
-    /** Project ingest key (`bci_...`). Upload-only; safe to ship in the app. Never put a `bcs_` key in an app. */
+    /** Ingest credential (`bct_...` SDK token key or legacy `bci_...` ingest key). Upload-only; safe to ship in the app. Never put a `bcs_` key in an app. */
     val ingestKey: String,
 )
 
@@ -42,13 +45,15 @@ fun interface ErrorFilter {
  *
  * ```kotlin
  * val config = BugCapsuleConfig.builder()
+ *     .token(BuildConfig.BUGCAPSULE_TOKEN)   // bcsdk.v1.… from the dashboard
  *     .mode(CaptureMode.QA)
- *     .backend("https://bugcapsule.example.com", BuildConfig.BUGCAPSULE_INGEST_KEY)
  *     .gitSha(BuildConfig.BUGCAPSULE_GIT_SHA)
  *     .redactKeys("loyaltyId")
  *     .build()
  * ```
  *
+ * Self-hosted / advanced: `.backend(url, ingestKey)` instead of `.token(…)`
+ * (when both are set the explicit backend wins and the token is ignored).
  * Every value has a default; app version/build/id default to the package info.
  */
 class BugCapsuleConfig private constructor(b: Builder) {
@@ -63,7 +68,16 @@ class BugCapsuleConfig private constructor(b: Builder) {
 
     /** Local master switch; the backend kill switch can also disable capture. */
     val enabled: Boolean = b.enabled
+
+    /** Explicit backend URL + ingest key. Wins over [token]. */
     val backend: BugCapsuleBackendConfig? = b.backend
+
+    /**
+     * SDK connection token (`bcsdk.v1.…`) from the dashboard: carries the API
+     * URL and the ingest credential. An unusable token never throws: the app
+     * runs without a backend and [BugCapsule.status] says why.
+     */
+    val token: String? = b.token
 
     /** Null: the `dev.bugcapsule.GIT_SHA` manifest meta-data, if any. */
     val gitSha: String? = b.gitSha
@@ -172,6 +186,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var mode: CaptureMode? = null
         internal var enabled = true
         internal var backend: BugCapsuleBackendConfig? = null
+        internal var token: String? = null
         internal var gitSha: String? = null
         internal var gitDirty: Boolean? = null
         internal var stateSchemaVersion = 1
@@ -227,7 +242,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
 
         internal constructor(c: BugCapsuleConfig) : this() {
             appVersion = c.appVersion; appBuild = c.appBuild; appId = c.appId; appName = c.appName
-            flavor = c.flavor; mode = c.mode; enabled = c.enabled; backend = c.backend; gitSha = c.gitSha
+            flavor = c.flavor; mode = c.mode; enabled = c.enabled; backend = c.backend; token = c.token; gitSha = c.gitSha
             gitDirty = c.gitDirty; stateSchemaVersion = c.stateSchemaVersion
             checkpointIntervalMs = c.checkpointIntervalMs; windowMs = c.windowMs; maxEvents = c.maxEvents
             productionSampleRate = c.productionSampleRate; autoCaptureOnFailure = c.autoCaptureOnFailure
@@ -259,6 +274,9 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun enabled(v: Boolean) = apply { enabled = v }
         fun backend(v: BugCapsuleBackendConfig?) = apply { backend = v }
         fun backend(url: String, ingestKey: String) = apply { backend = BugCapsuleBackendConfig(url, ingestKey) }
+
+        /** The SDK connection token (`bcsdk.v1.…`); see [BugCapsuleConfig.token]. */
+        fun token(v: String?) = apply { token = v }
         fun gitSha(v: String?) = apply { gitSha = v?.takeIf { it.isNotBlank() } }
         fun gitDirty(v: Boolean?) = apply { gitDirty = v }
         fun stateSchemaVersion(v: Int) = apply { stateSchemaVersion = v }

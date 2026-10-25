@@ -25,7 +25,11 @@ class ShopApp : Application() {
             .tracesSampleRate(1.0)
             .enableTimeToFullDisplayTracing(false)
             .enableShakeToReport(true)
-        if (BuildConfig.BUGCAPSULE_INGEST_KEY.isNotEmpty()) {
+        if (BuildConfig.BUGCAPSULE_TOKEN.isNotEmpty()) {
+            // The SDK connection token carries the API URL and the ingest credential.
+            builder.token(BuildConfig.BUGCAPSULE_TOKEN)
+        } else if (BuildConfig.BUGCAPSULE_INGEST_KEY.isNotEmpty()) {
+            // Self-hosted / advanced: explicit backend URL + ingest key.
             builder.backend(BuildConfig.BUGCAPSULE_URL, BuildConfig.BUGCAPSULE_INGEST_KEY)
         }
         // Call BugCapsule.init first: replay restores storage right before Application.onCreate.

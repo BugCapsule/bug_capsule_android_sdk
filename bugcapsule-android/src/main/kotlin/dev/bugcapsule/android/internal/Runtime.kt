@@ -4,6 +4,9 @@ import android.content.Context
 import dev.bugcapsule.android.BugCapsuleConfig
 import dev.bugcapsule.android.BugCapsuleIntegration
 import dev.bugcapsule.android.BugCapsuleSession
+import dev.bugcapsule.android.BugCapsuleStatus
+import dev.bugcapsule.android.ConnectionSource
+import dev.bugcapsule.android.ConnectionState
 import dev.bugcapsule.android.CaptureResult
 import dev.bugcapsule.android.ReplayContext
 import dev.bugcapsule.android.StateRestorer
@@ -23,6 +26,7 @@ import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.core.FlightRecorder
 import dev.bugcapsule.android.core.Ids
 import dev.bugcapsule.android.core.J
+import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.PlatformInfo
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.core.ReplayOutcome
@@ -81,6 +85,8 @@ internal class Runtime(
     val integrations: List<BugCapsuleIntegration>,
     private val overrides: BugCapsuleTestOverrides?,
     val actions: ActionRegistry,
+    /** How [config]'s backend was configured (token or explicit), and why a token could not be used. */
+    private val connection: ResolvedConnection = ResolvedConnection.NONE,
 ) : BugCapsuleSession {
     private val samplingRandom: Random = overrides?.random ?: Random()
     private val startElapsed = host.elapsedRealtime()
@@ -126,6 +132,13 @@ internal class Runtime(
     @Volatile
     var lastFailure: FailureRecord? = null
         private set
+
+    /** Connection confirmation 2 (epoch ms): the backend accepted data from this process. */
+    @Volatile
+    private var firstEventAcceptedAt: Long? = null
+
+    @Volatile
+    private var firstCapsuleAcceptedAt: Long? = null
     private val capturedSignatures = Collections.synchronizedSet(HashSet<String>())
     private val seenSignatures = Collections.synchronizedSet(HashSet<String>())
 
@@ -324,7 +337,7 @@ internal class Runtime(
         if (!config.enabled) return
         val s = CapsuleStore(overrides?.storageDir ?: host.storageRoot, config.maxSavedCaptures)
         store = s
-        val t = overrides?.transport ?: config.backend?.let { BackendClient(it) }
+        val t = (overrides?.transport ?: config.backend?.let { BackendClient(it) })?.let { observed(it) }
         if (t != null) {
             transport = t
             outbox = UploadOutbox(s.outboxDir, config.outboxLimits)
@@ -338,6 +351,13 @@ internal class Runtime(
                     Cancellable { f.cancel(false) }
                 },
                 maxStaleMs = config.maxStaleConfigMs,
+                onRejected = { f ->
+                    val what = if (connection.source == ConnectionSource.TOKEN) "SDK token" else "ingest key"
+                    SdkLog.w(
+                        "the backend refused this app's $what (${f.reason ?: "HTTP ${f.status}"})" +
+                            (f.detail?.let { ": $it" } ?: "") + ". Capture and uploads are off for this app session.",
+                    )
+                },
             ).also { it.loadCached() }
         }
         val cached = remote?.current
@@ -960,7 +980,8 @@ internal class Runtime(
             box.flush(
                 upload = { bytes ->
                     val result = t.upload(bytes)
-                    if (result.message == "capture_disabled") schedule(0) { controller.refresh() }
+                    // A kill switch or a refused credential since the last fetch: the config says what to do.
+                    if (result.message == "capture_disabled" || result.unauthorized) schedule(0) { controller.refresh() }
                     result
                 },
                 allowed = { uploadsAllowed },
@@ -984,7 +1005,7 @@ internal class Runtime(
         maxCapsuleBytes = next.maxCapsuleBytes
         if (keyRejected) monitoring?.disable(purge = false) else monitoring?.onRemoteConfig(next)
         if (keyRejected) {
-            if (recording) SdkLog.w("capture stopped: ingest key rejected")
+            // Logged once by the controller's onRejected, with the backend's reason.
             stopRecording()
             return
         }
@@ -1137,6 +1158,102 @@ internal class Runtime(
     }
 
     fun savedCaptures(): List<File> = store?.savedCaptures() ?: emptyList()
+
+    // ---------------------------------------------------------------- status
+
+    /** Notes the first event and Capsule the backend accepted (connection confirmation), results unchanged. */
+    private fun observed(t: Transport): Transport = object : Transport {
+        override fun fetchConfig(): ConfigFetchResult = t.fetchConfig()
+
+        override fun upload(bytes: ByteArray): UploadResult = t.upload(bytes).also {
+            if (it.status == UploadStatus.UPLOADED && firstCapsuleAcceptedAt == null) firstCapsuleAcceptedAt = System.currentTimeMillis()
+        }
+
+        override fun sendEnvelope(gzippedJson: ByteArray): UploadResult = t.sendEnvelope(gzippedJson).also {
+            if (it.status == UploadStatus.UPLOADED && firstEventAcceptedAt == null && hasEvent(gzippedJson)) {
+                firstEventAcceptedAt = System.currentTimeMillis()
+            }
+        }
+    }
+
+    private fun hasEvent(gzippedJson: ByteArray): Boolean = try {
+        val env = J.obj(Json.parse(String(java.util.zip.GZIPInputStream(gzippedJson.inputStream()).readBytes(), Charsets.UTF_8)))
+        (J.list(env?.get("items")) ?: emptyList()).any { J.obj(it)?.get("type") == "event" }
+    } catch (_: Exception) {
+        false
+    }
+
+    /** Connection and instrumentation ([dev.bugcapsule.android.BugCapsule.status]). */
+    fun status(): BugCapsuleStatus {
+        val controller = remote
+        val failure = controller?.lastFailure
+        val tokenError = connection.tokenError
+        val state = when {
+            tokenError != null -> ConnectionState.valueOf(tokenError.name)
+            config.backend == null && overrides?.transport == null -> ConnectionState.NOT_CONFIGURED
+            !config.enabled || engine != null -> ConnectionState.DISABLED
+            controller?.keyRejected == true -> ConnectionState.REJECTED
+            controller?.current?.enabled == false -> ConnectionState.DISABLED
+            controller?.fetchedThisSession != null -> ConnectionState.CONNECTED
+            failure != null && failure.unreachable -> ConnectionState.OFFLINE
+            else -> ConnectionState.CONNECTING
+        }
+        val reason = when {
+            tokenError != null -> tokenError.code
+            state == ConnectionState.REJECTED || state == ConnectionState.OFFLINE -> failure?.reason ?: failure?.message
+            else -> null
+        }
+        val message = when {
+            tokenError != null -> connection.tokenMessage
+            state == ConnectionState.REJECTED -> failure?.detail ?: "the backend refused the credential; generate a new SDK token in the dashboard"
+            state == ConnectionState.OFFLINE -> "the backend could not be reached; data is kept and retried"
+            state == ConnectionState.NOT_CONFIGURED -> "no token or backend configured; capsules stay on the device"
+            state == ConnectionState.DISABLED && engine != null -> "replaying: the SDK does not talk to the backend"
+            state == ConnectionState.DISABLED && !config.enabled -> "disabled by the app (enabled = false)"
+            state == ConnectionState.DISABLED -> "capture is turned off for this project (remote config)"
+            else -> null
+        }
+        val names = integrations.map { it.name }
+        val network = "okhttp" in names
+        val navigation = "navigation" in names
+        val appState = states.isNotEmpty() || names.any { it == "shared_preferences" || it == "datastore" }
+        val missing = buildList {
+            if (!network) add("network")
+            if (!navigation) add("navigation")
+            if (!appState) add("app_state")
+        }
+        return BugCapsuleStatus(
+            BugCapsuleStatus.Connection(
+                state = state,
+                source = connection.source,
+                apiUrl = config.backend?.url?.trimEnd('/'),
+                reason = reason,
+                message = message,
+                configFetchedAt = controller?.fetchedThisSession,
+                firstEventAcceptedAt = firstEventAcceptedAt,
+                firstCapsuleAcceptedAt = firstCapsuleAcceptedAt,
+            ),
+            BugCapsuleStatus.Instrumentation(
+                recording = recording,
+                network = network,
+                navigation = navigation,
+                appState = appState,
+                nativeCrashes = ndkPresent,
+                frameworks = synchronized(frameworks) { frameworks.toList() },
+                integrations = names,
+                missing = missing,
+            ),
+        )
+    }
+
+    private val ndkPresent: Boolean by lazy {
+        try {
+            Class.forName("dev.bugcapsule.ndk.BugCapsuleNdk", false, Runtime::class.java.classLoader)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     fun dispose() {
         disposed = true

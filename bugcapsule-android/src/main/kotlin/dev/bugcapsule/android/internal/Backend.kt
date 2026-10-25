@@ -10,20 +10,37 @@ import java.net.URL
 
 enum class UploadStatus { UPLOADED, REJECTED, RETRY_LATER }
 
-/** Result of one upload attempt. [retryAfterMs] comes from a `Retry-After` header. */
+/** Result of one upload attempt. [retryAfterMs] comes from a `Retry-After` header; [httpStatus] is null without an HTTP answer. */
 data class UploadResult(
     val status: UploadStatus,
     val serverId: String? = null,
     val message: String? = null,
     val retryAfterMs: Long? = null,
-)
+    val httpStatus: Int? = null,
+) {
+    /** The backend refused the credential (401/403): the remote config decides whether capture stops. */
+    val unauthorized: Boolean get() = httpStatus == 401 || httpStatus == 403
+}
 
 sealed class ConfigFetchResult {
     data class Fetched(val config: RemoteCaptureConfig) : ConfigFetchResult()
-    data class Failed(val message: String, val status: Int? = null, val retryAfterMs: Long? = null) :
-        ConfigFetchResult() {
-        /** The ingest key was rejected (revoked or rotated). */
+    /**
+     * [status] is null when there was no HTTP answer (offline, timeout).
+     * [reason] / [detail] come from the backend's problem body, e.g.
+     * `token_revoked` and what to do about it.
+     */
+    data class Failed(
+        val message: String,
+        val status: Int? = null,
+        val retryAfterMs: Long? = null,
+        val reason: String? = null,
+        val detail: String? = null,
+    ) : ConfigFetchResult() {
+        /** The ingest credential was refused (revoked, expired, rotated, unknown). */
         val unauthorized: Boolean get() = status == 401 || status == 403
+
+        /** No answer, or one worth retrying: the backend is unreachable for now. */
+        val unreachable: Boolean get() = status == null || status >= 500 || status == 408 || status == 429
     }
 }
 
@@ -64,7 +81,18 @@ internal class BackendClient(
             val status = conn.responseCode
             val body = readBody(conn)
             if (status != 200) {
-                return ConfigFetchResult.Failed("HTTP $status", status, retryAfter(conn))
+                val problem = try {
+                    J.obj(Json.parse(body))
+                } catch (_: Exception) {
+                    null
+                }
+                return ConfigFetchResult.Failed(
+                    "HTTP $status",
+                    status,
+                    retryAfter(conn),
+                    reason = J.str(problem?.get("reason"))?.take(100),
+                    detail = J.str(problem?.get("detail"))?.take(500),
+                )
             }
             val json = J.obj(Json.parse(body)) ?: return ConfigFetchResult.Failed("config is not a JSON object")
             ConfigFetchResult.Fetched(RemoteCaptureConfig.fromJson(json, fetchedAtMs = nowMs()))
@@ -120,7 +148,12 @@ internal class BackendClient(
             val code = J.str(json?.get("code")) ?: "HTTP $status"
             // 4xx other than 401/408/429 never succeed: drop instead of retrying.
             val retry = status >= 500 || status == 401 || status == 408 || status == 429
-            UploadResult(if (retry) UploadStatus.RETRY_LATER else UploadStatus.REJECTED, message = code, retryAfterMs = retryAfter(conn))
+            UploadResult(
+                if (retry) UploadStatus.RETRY_LATER else UploadStatus.REJECTED,
+                message = code,
+                retryAfterMs = retryAfter(conn),
+                httpStatus = status,
+            )
         } catch (e: Exception) {
             UploadResult(UploadStatus.RETRY_LATER, message = e.toString())
         } finally {

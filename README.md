@@ -27,14 +27,58 @@ DataStore checkpoints need `androidx.datastore:datastore-preferences` 1.1+ in th
 
 ## Quickstart
 
+### 1. Connect with one token
+
+Copy the **SDK token** (`bcsdk.v1.…`) from the BugCapsule dashboard
+(Project settings → Keys → SDK tokens). It carries the API URL and an upload-only
+credential, so it is the only value the app needs:
+
+```kotlin
+class ShopApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        BugCapsule.init(this, BuildConfig.BUGCAPSULE_TOKEN)
+    }
+}
+```
+
+```java
+BugCapsule.init(this, BuildConfig.BUGCAPSULE_TOKEN);   // Java
+```
+
+Call it first in `Application.onCreate` (not from a ContentProvider or App
+Startup initializer: replay restores storage right before
+`Application.onCreate`). `BUGCAPSULE_TOKEN` is a `buildConfigField` (step 2);
+a string literal works too, the token ships inside the app anyway.
+
+That's the whole setup: capsule capture and monitoring (errors, ANRs,
+sessions, screen tracing) start automatically, the configuration is fetched
+in the background, and app version / build come from the package info. The
+token is client-visible like an ingest key: it can only fetch the project's
+SDK configuration and upload Capsules and events. It never reads data and
+never reaches the console. Never put a `bcs_` secret key in an app.
+
+`init` never throws, never blocks on the network and never stops the app
+from starting. A token that can't be used (empty, damaged, a bare `bci_`/`bct_`
+key pasted instead of the token, or a newer token version) logs one line under
+the `BugCapsule` tag with what to do, the app runs without the backend, and
+`BugCapsule.status()` reports `invalid_token` / `unsupported_token_version`.
+
+### 2. Add the progressive adapters
+
+The token proves connectivity; replay needs the app's inputs too. Add the
+artifacts and pass their integrations (any you skip show up as `missing` in
+`BugCapsule.status()`):
+
 ```kotlin
 // build.gradle.kts (app)
 android {
     defaultConfig {
         testInstrumentationRunner = "dev.bugcapsule.android.replay.BugCapsuleReplayRunner"
+        // The token comes from the environment / CI secrets, never from sources.
+        buildConfigField("String", "BUGCAPSULE_TOKEN", "\"${providers.environmentVariable("BUGCAPSULE_SDK_TOKEN").getOrElse("")}\"")
         // The CLI passes -PbugcapsuleGitSha=<sha> so capsules and replays carry the build's commit.
         buildConfigField("String", "BUGCAPSULE_GIT_SHA", "\"${providers.gradleProperty("bugcapsuleGitSha").getOrElse("")}\"")
-        buildConfigField("String", "BUGCAPSULE_INGEST_KEY", "\"${providers.environmentVariable("BUGCAPSULE_INGEST_KEY").getOrElse("")}\"")
     }
     buildFeatures.buildConfig = true
 }
@@ -58,8 +102,8 @@ class ShopApp : Application() {
         BugCapsule.init(
             this,
             BugCapsuleConfig.builder()
+                .token(BuildConfig.BUGCAPSULE_TOKEN)        // bcsdk.v1.… from the dashboard
                 .mode(CaptureMode.QA)                       // default: DEBUG if debuggable, else PRODUCTION
-                .backend("https://bugcapsule.example.com", BuildConfig.BUGCAPSULE_INGEST_KEY) // bci_… only
                 .gitSha(BuildConfig.BUGCAPSULE_GIT_SHA)
                 .redactKeys("loyaltyId")
                 .build(),
@@ -81,14 +125,65 @@ val client = OkHttpClient.Builder()
     .build()
 ```
 
+| Adapter | Gives replay | Detected by `status().instrumentation` |
+|---|---|---|
+| `bugcapsule-okhttp` (`BugCapsuleOkHttp`) | network fixtures (OkHttp, Retrofit) | `network` |
+| `bugcapsule-navigation` (`BugCapsuleNavigation`) | routes, back stack restore | `navigation` |
+| `BugCapsuleSharedPreferences` / `BugCapsuleDataStore`, `registerState` / `registerViewModel` | app state in checkpoints | `appState` |
+| `bugcapsule-compose` helpers | semantic actions, tracked text, screens | `frameworks` contains `compose` (after first composition) |
+| `bugcapsule-ndk` | native crash events | `nativeCrashes` |
+| `bugcapsule-sqlite` | `db.sql.query` spans | not detectable (a `SupportSQLiteOpenHelper.Factory` wrapper) |
+
 Java:
 
 ```java
-BugCapsuleConfig config = BugCapsuleConfig.builder().mode(CaptureMode.QA).backend(url, key).build();
+BugCapsuleConfig config = BugCapsuleConfig.builder().token(BuildConfig.BUGCAPSULE_TOKEN).mode(CaptureMode.QA).build();
 BugCapsule.init(app, config, Arrays.asList(okHttp, navigation));
 BugCapsuleViews.onClick(button, "cart.checkout", v -> viewModel.checkout());
 BugCapsule.check("cart_total_non_negative", total >= 0, "total " + total);
 ```
+
+### 3. Check the connection: `BugCapsule.status()`
+
+```kotlin
+val status = BugCapsule.status()
+Log.i("Shop", "BugCapsule ${status.connection.state.code}: ${status.connection.message ?: "ok"}, missing ${status.instrumentation.missing}")
+```
+
+`status.connection` has `state`, `source` (`TOKEN` / `BACKEND`), `apiUrl`,
+`reason`, `message` and two separate confirmations: `configFetchedAt` (the
+backend answered with this app's credential: URL, credential and network are
+right) and `firstEventAcceptedAt` / `firstCapsuleAcceptedAt` (captured data
+reached the project). Neither proves complete replay instrumentation; that is
+`status.instrumentation` (`recording`, `network`, `navigation`, `appState`,
+`nativeCrashes`, `frameworks`, `integrations`, `missing`).
+
+| `state` | Meaning |
+|---|---|
+| `not_configured` | No token and no backend: capsules stay on the device. |
+| `invalid_token` / `unsupported_token_version` | The token can't be used (`message` says why); the app runs without the backend. |
+| `connecting` | Configured; the configuration has not arrived yet. |
+| `connected` | The backend answered the configuration request. |
+| `offline` | No network, timeout or server error. Data waits in the bounded outbox and is retried with backoff; the app is unaffected. |
+| `rejected` | The backend refused the credential; `reason` is `token_revoked`, `token_expired`, `token_unknown` or `key_unknown_or_revoked` and `message` says what to do. Capture and uploads stop for this app session (one log line). Generate a new token. |
+| `disabled` | `enabled(false)`, the project's remote kill switch, or a replay run. |
+
+### Self-hosted / explicit backend (advanced)
+
+A self-hosted backend issues tokens with its own API URL, so the token setup
+above works unchanged. You can still configure the URL and ingest credential
+explicitly; existing apps keep working as they are:
+
+```kotlin
+BugCapsuleConfig.builder()
+    .backend("https://bugcapsule.example.com", BuildConfig.BUGCAPSULE_INGEST_KEY)   // bct_… or legacy bci_…
+    .build()
+```
+
+When both `token` and `backend` are set, the explicit backend wins and the SDK
+logs that the token was ignored. On an emulator, the token's API URL must be
+reachable from the device (a backend on the host machine is `10.0.2.2`, not
+`127.0.0.1`); use an explicit backend otherwise.
 
 ### Integration examples
 
@@ -181,14 +276,14 @@ activity; `t` uses `SystemClock.elapsedRealtime()`.
 
 Implements [`monitoring-v1`](../bug_capsule_backend/docs/monitoring-v1.md):
 error events, release-health sessions, transactions and feedback, sent as
-gzip envelopes to `POST /v1/envelope` with the same ingest key. It runs in
+gzip envelopes to `POST /v1/envelope` with the same credential. It runs in
 every capture session, **whether or not the session records a capsule**
 (production sampling only applies to capsules), never during replay, and
 `enabled(false)` / `monitoring(false)` turn it off.
 
 ```kotlin
 BugCapsuleConfig.builder()
-    .backend(url, BuildConfig.BUGCAPSULE_INGEST_KEY)
+    .token(BuildConfig.BUGCAPSULE_TOKEN)
     // release defaults to "<appId>@<versionName>+<versionCode>", environment to production/qa/development by mode
     .tracesSampleRate(0.2)                          // or .tracesSampler { ctx -> if (ctx.op == "app.start.cold") 1.0 else null }
     .tracePropagationTargets("api.shop.com", "/^https://.*\\.internal\\//")  // none by default
@@ -382,16 +477,20 @@ is not a credential, and binary bodies are not detected automatically.
 
 ## Backend connectivity
 
-`GET /v1/sdk/config` and `POST /v1/capsules` (gzip body,
-`application/octet-stream`, `Authorization: Bearer bci_…`) over
-`HttpURLConnection` (the SDK's own traffic is never captured). Uploads only
+The token (or explicit backend) gives the API URL and credential:
+`GET {api}/v1/sdk/config`, `POST {api}/v1/capsules` (gzip body,
+`application/octet-stream`) and `POST {api}/v1/envelope`, each with
+`Authorization: Bearer <credential>`, over `HttpURLConnection` on the SDK's
+background thread (the SDK's own traffic is never captured). Uploads only
 after a successful config fetch (or a cached one younger than 7 days); outbox
 10 capsules / 10 MiB / 7 days, oldest evicted first; retry 30 s → 1 h with ±20 %
 jitter and `Retry-After`; 401/408/429/5xx/network retry, other 4xx drop;
 `capture_disabled` triggers a config refresh. Remote config is cached per
 (backend URL, ingest key), refreshed after its TTL (min 30 s), with 30 s → 30
 min backoff and on foreground. 401/403 stops capture for the session (queue
-kept). Production sessions record with probability
+kept) and is logged once with the backend's reason and advice; a 401 on an
+upload refreshes the configuration first. Network failures, timeouts and 5xx
+never reach the app: status `offline`, data stays queued. Production sessions record with probability
 `min(productionSampleRate (0.1), remote sampleRate)`. Storage never crashes the
 app: atomic writes, temp files cleaned at start, corrupt files dropped,
 disk-full drops the capsule. From an emulator the host is `10.0.2.2`; allow
@@ -452,8 +551,9 @@ Monitoring is on in the demo: every screen is traced, errors from the planted
 bugs arrive as events linked to their capsules, and shaking the device opens
 the feedback dialog (`bugcapsule-ndk` is included for native crash events).
 
-Build: `./gradlew :demo:assembleDebug` (export `BUGCAPSULE_INGEST_KEY=bci_…`
-to enable uploads; `-PbugcapsuleBackendUrl=` overrides `http://10.0.2.2:8787`).
+Build: `./gradlew :demo:assembleDebug` (export `BUGCAPSULE_SDK_TOKEN=bcsdk.v1.…`
+to enable uploads; self-hosted / advanced: `BUGCAPSULE_INGEST_KEY=bct_…` with
+`-PbugcapsuleBackendUrl=`, default `http://10.0.2.2:8787`).
 The demo's `bugcapsule.json` points the CLI at this Gradle build
 (`gradleDir: "../.."`, module `demo`).
 
@@ -475,13 +575,19 @@ inconclusive with `network.unrecorded`.
 
 ```
 ./gradlew test                                   # every module, plus the Gradle plugin's tests
-./gradlew :demo:connectedDebugAndroidTest        # emulator; unset BUGCAPSULE_INGEST_KEY first
+./gradlew :demo:connectedDebugAndroidTest        # emulator; unset BUGCAPSULE_SDK_TOKEN / BUGCAPSULE_INGEST_KEY first
 bugcapsule-ndk/src/test/native/smoke.sh          # host smoke test of the signal handler (clang)
 ```
 
 Monitoring is tested against a stubbed backend (MockWebServer speaking
 monitoring-v1): envelopes, capsule links, sessions, sampling, remote config,
 Retry-After, trace propagation, feedback.
+
+Token-only setup is tested the same way (`TokenSetupTest`: config fetch with
+the token's credential, explicit backend precedence, invalid / unsupported
+tokens, revoked token, hanging network, offline outbox), and the parser runs
+every shared vector in `spec-fixtures/connection-token-v1/vectors.json`
+(`ConnectionTokenTest`).
 
 The vendored `spec-fixtures/` must equal `../bug_capsule_flutter_sdk/spec/fixtures`
 (`FixtureSyncTest`); re-sync with `bug_capsule_flutter_sdk/tool/sync_spec.sh`.
