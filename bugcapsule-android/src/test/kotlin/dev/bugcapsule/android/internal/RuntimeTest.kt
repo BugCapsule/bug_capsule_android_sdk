@@ -138,6 +138,8 @@ class RuntimeTest {
         awaitCapture()
         val bytes = transport.uploads.poll(10, TimeUnit.SECONDS)
         assertTrue(bytes != null && CapsuleCodec.decode(bytes).manifest.failure != null)
+        // The transport queue is populated before the executor removes the outbox entry.
+        BugCapsule.flushUploads().get(5, TimeUnit.SECONDS)
         assertTrue(BugCapsule.session.let { (it as Runtime).outbox!!.entries().isEmpty() })
     }
 
