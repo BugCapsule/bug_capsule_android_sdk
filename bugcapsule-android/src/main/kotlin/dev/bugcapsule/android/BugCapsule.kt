@@ -10,7 +10,9 @@ import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.internal.ActionRegistry
 import dev.bugcapsule.android.internal.BugCapsuleTestOverrides
+import dev.bugcapsule.android.internal.ConnectionResolver
 import dev.bugcapsule.android.internal.Host
+import dev.bugcapsule.android.internal.ResolvedConnection
 import dev.bugcapsule.android.internal.Runtime
 import dev.bugcapsule.android.internal.SdkLog
 import dev.bugcapsule.android.internal.UploadResult
@@ -48,20 +50,29 @@ class CaptureResult(
  * class ShopApp : Application() {
  *     override fun onCreate() {
  *         super.onCreate()
- *         BugCapsule.init(this, BugCapsuleConfig.builder().mode(CaptureMode.QA).build(),
- *             listOf(okHttp, navigation, BugCapsuleSharedPreferences.builder().allowFile("prefs").build()))
+ *         BugCapsule.init(this, BuildConfig.BUGCAPSULE_TOKEN)   // bcsdk.v1.… from the dashboard
  *     }
  * }
  * ```
  *
+ * Progressive setup adds integrations and options:
+ * `BugCapsule.init(this, BugCapsuleConfig.builder().token(…).mode(CaptureMode.QA).build(), listOf(okHttp, navigation))`.
+ * [status] reports the connection and which adapters are still missing.
+ *
  * Call [init] first in `Application.onCreate` (not from a ContentProvider or
  * App Startup initializer): replay restores storage right before
  * `Application.onCreate`. BugCapsule never stops the app from starting: if
- * setup fails the app runs without capture.
+ * setup fails, or the token can't be used, the app runs without capture /
+ * without the backend, and [status] says why. Network work never runs on
+ * the calling thread.
  */
 object BugCapsule {
     @Volatile
     private var runtime: Runtime? = null
+
+    /** Set by [init] even when setup fails, so [status] can say why. */
+    @Volatile
+    private var connection: ResolvedConnection? = null
     private val actions = ActionRegistry()
     private val fallbackRandom = Random()
 
@@ -70,6 +81,11 @@ object BugCapsule {
     @JvmStatic
     var testOverrides: BugCapsuleTestOverrides? = null
 
+    /**
+     * Starts BugCapsule. With [BugCapsuleConfig.token] (or an explicit
+     * [BugCapsuleConfig.backend], which wins) capsules and monitoring are sent
+     * to the backend; the configuration is fetched in the background.
+     */
     @JvmStatic
     @JvmOverloads
     @Synchronized
@@ -79,12 +95,60 @@ object BugCapsule {
             return
         }
         try {
-            val rt = Runtime(Host(application), config, integrations, testOverrides, actions)
+            val (resolved, conn) = ConnectionResolver.resolve(config)
+            connection = conn
+            val rt = Runtime(Host(application), resolved, integrations, testOverrides, actions, conn)
             runtime = rt
             rt.start()
         } catch (e: Throwable) {
             SdkLog.w("BugCapsule setup failed; the app runs without capture: $e")
         }
+    }
+
+    /**
+     * Token-only setup: `BugCapsule.init(this, "bcsdk.v1.…")` with the SDK
+     * connection token from the dashboard. Everything else uses defaults (app
+     * version and build come from the package info); pass [integrations] for
+     * the progressive adapters (OkHttp, Navigation, storage).
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun init(application: Application, token: String, integrations: List<BugCapsuleIntegration> = emptyList()) =
+        init(application, BugCapsuleConfig.builder().token(token).build(), integrations)
+
+    /**
+     * Connection (token or backend, state, the backend's refusal reason, the
+     * two connection confirmations) and instrumentation (which progressive
+     * adapters are installed or missing), for setup checks and support.
+     * Never null: before [init] the state is [ConnectionState.NOT_CONFIGURED].
+     */
+    @JvmStatic
+    fun status(): BugCapsuleStatus {
+        runtime?.let { rt ->
+            try {
+                return rt.status()
+            } catch (_: Throwable) {
+            }
+        }
+        val conn = connection
+        val tokenError = conn?.tokenError
+        val state = when {
+            tokenError != null -> ConnectionState.valueOf(tokenError.name)
+            conn != null -> ConnectionState.DISABLED
+            else -> ConnectionState.NOT_CONFIGURED
+        }
+        val message = when {
+            tokenError != null -> conn.tokenMessage
+            conn != null -> "setup failed; the app runs without BugCapsule"
+            else -> "BugCapsule.init has not been called"
+        }
+        return BugCapsuleStatus(
+            BugCapsuleStatus.Connection(state, conn?.source, null, tokenError?.code, message, null, null, null),
+            BugCapsuleStatus.Instrumentation(
+                recording = false, network = false, navigation = false, appState = false, nativeCrashes = false,
+                frameworks = emptyList(), integrations = emptyList(), missing = listOf("network", "navigation", "app_state"),
+            ),
+        )
     }
 
     @JvmStatic
@@ -494,6 +558,7 @@ object BugCapsule {
     fun resetForTest() {
         runtime?.dispose()
         runtime = null
+        connection = null
         actions.clear()
         dev.bugcapsule.android.replay.BugCapsuleReplay.resetForTest()
     }

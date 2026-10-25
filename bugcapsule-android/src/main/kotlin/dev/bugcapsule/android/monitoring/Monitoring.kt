@@ -44,7 +44,7 @@ internal interface MonitoringEnvironment {
     /** A recent enabled config allows uploads (same rule as capsules). */
     val uploadsAllowed: Boolean
 
-    /** The server answered `capture_disabled`. */
+    /** The server answered `capture_disabled`, or refused the credential: refresh the remote config. */
     fun onCaptureDisabled()
     fun schedule(delayMs: Long, task: Runnable): Cancellable
     fun <T> submit(task: Callable<T>): Future<T>
@@ -589,7 +589,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
             box.flush(
                 upload = { bytes ->
                     val result = send(t, bytes)
-                    if (result.message == "capture_disabled") env.onCaptureDisabled()
+                    if (result.message == "capture_disabled" || result.unauthorized) env.onCaptureDisabled()
                     result
                 },
                 allowed = { active && env.uploadsAllowed },

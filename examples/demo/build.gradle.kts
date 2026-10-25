@@ -30,8 +30,11 @@ android {
         // Embedded at build time; the CLI passes -PbugcapsuleGitSha=<sha> for replay builds.
         buildConfigField("String", "BUGCAPSULE_GIT_SHA", quoted(setting("bugcapsuleGitSha", "BUGCAPSULE_GIT_SHA")))
         buildConfigField("boolean", "BUGCAPSULE_GIT_DIRTY", setting("bugcapsuleGitDirty", "BUGCAPSULE_GIT_DIRTY", "false"))
-        // Backend: the emulator reaches the host's 127.0.0.1 as 10.0.2.2. The
-        // ingest key (bci_...) comes from the environment, never from sources.
+        // Backend connection, from the environment, never from sources. Primary:
+        // the SDK connection token (bcsdk.v1...) from the dashboard. Self-hosted /
+        // advanced alternative: an explicit URL + ingest key (the emulator reaches
+        // the host's 127.0.0.1 as 10.0.2.2).
+        buildConfigField("String", "BUGCAPSULE_TOKEN", quoted(setting("bugcapsuleToken", "BUGCAPSULE_SDK_TOKEN")))
         buildConfigField("String", "BUGCAPSULE_URL", quoted(setting("bugcapsuleBackendUrl", "BUGCAPSULE_DEMO_BACKEND_URL", "http://10.0.2.2:8787")))
         buildConfigField("String", "BUGCAPSULE_INGEST_KEY", quoted(setting("bugcapsuleIngestKey", "BUGCAPSULE_INGEST_KEY")))
         // Temporary, isolated fix toggle for verification: -PbugcapsuleDemoFix=race
