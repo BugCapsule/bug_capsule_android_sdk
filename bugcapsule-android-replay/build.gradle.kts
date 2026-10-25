@@ -15,6 +15,7 @@ dependencies {
     api(libs.androidx.test.core)
     api(libs.androidx.test.ext.junit)
     api(libs.junit)
+    implementation(libs.core.ktx)
 
     testImplementation(libs.robolectric)
 }

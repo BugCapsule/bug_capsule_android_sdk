@@ -62,7 +62,7 @@ class ViewsCaptureTest {
                 if (total < 100) break
                 pressBack()
             }
-            onView(withId(R.id.coupon)).perform(typeText("SAVE100"), closeSoftKeyboard())
+            onView(withId(R.id.coupon)).perform(typeText("SAVE100"), click(), closeSoftKeyboard())
             onView(withId(R.id.apply_coupon)).perform(click())
             val file = awaitNewCapture(before)
             val capsule = CapsuleCodec.decode(file.readBytes())
@@ -72,6 +72,9 @@ class ViewsCaptureTest {
             assertEquals(listOf("okhttp", "navigation", "shared_preferences", "datastore"), m.integrations)
             val types = capsule.events.map { it.type }.toSet()
             assertTrue(types.toString(), types.containsAll(setOf("pointer", "action", "text", "route", "http", "state", "lifecycle", "failure")))
+            val pointers = capsule.events.filter { it.type == "pointer" }
+            assertTrue("pointer events retain keyboard visibility", pointers.all { it.data["imeVisible"] is Boolean })
+            assertEquals(false, pointers.last { it.data["phase"] == "down" }.data["imeVisible"])
             assertEquals("SAVE100", capsule.events.last { it.type == "text" }.data["value"])
             assertTrue(capsule.events.any { it.type == "route" && it.data["location"] == "/id/cart?source=home" })
             val cart = capsule.events.last { it.type == "http" && it.data["method"] == "GET" }
@@ -84,6 +87,7 @@ class ViewsCaptureTest {
             assertTrue(x > 0 && x < m.platform.screenWidth)
             assertTrue(m.capabilities["network.okhttp"] == "supported")
         }
+        assertTrue("monitoring envelopes flush before test uninstall", BugCapsule.flush(15_000))
     }
 
     private fun awaitNewCapture(before: Set<String>): File {

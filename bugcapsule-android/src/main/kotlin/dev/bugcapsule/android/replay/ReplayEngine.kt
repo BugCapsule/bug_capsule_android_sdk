@@ -39,6 +39,9 @@ interface ReplayDriver {
     /** [phase] is `down`, `move`, `up` or `cancel`; coordinates are screen pixels. */
     fun dispatchPointer(phase: String, pointer: Int, xPx: Float, yPx: Float, kind: String, buttons: Int)
 
+    /** Restores the recorded soft keyboard state before a new pointer gesture. */
+    fun preparePointer(imeVisible: Boolean) {}
+
     fun runOnMainSync(block: Runnable)
 
     /** Drives the app to a recorded process lifecycle state; false when it cannot. */
@@ -378,6 +381,7 @@ class ReplayEngine(
             if (phase == "up" || phase == "cancel") pressed.remove(pointer) else pressed.add(pointer)
         }
         inputsStarted = true
+        if (phase == "down") (d["imeVisible"] as? Boolean)?.let(driver::preparePointer)
         driver.dispatchPointer(phase, pointer, x.toFloat(), y.toFloat(), kind, buttons)
     }
 }

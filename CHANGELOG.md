@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.1-beta.4 — 2026-10-25
 
+- Record soft-keyboard visibility with pointer input and restore it before injection. This prevents touches hitting the IME window on older Android versions; synchronization failures remain replay divergences.
 - Register first-draw callbacks after the window attaches on older Android versions. This restores the replay session time origin and initial-display measurements on Android 6.
 - Add first-draw lifecycle regression coverage for API 23 and API 28.
 
