@@ -20,12 +20,13 @@ class FixtureSyncTest {
     fun vendoredFixturesExist() {
         assertTrue(File(SpecFixtures.dir, "capsule-v1/valid").isDirectory)
         assertTrue(File(SpecFixtures.dir, "conformance/request-keys.json").isFile)
+        assertTrue(File(SpecFixtures.dir, "connection-token-v1/vectors.json").isFile)
     }
 
     @Test
     fun vendoredFixturesMatchUpstream() {
         assumeTrue("upstream fixtures not checked out", SpecFixtures.upstream.isDirectory)
-        for (sub in listOf("capsule-v1", "conformance")) {
+        for (sub in listOf("capsule-v1", "conformance", "connection-token-v1")) {
             val upstream = tree(File(SpecFixtures.upstream, sub))
             val vendored = tree(File(SpecFixtures.dir, sub))
             assertEquals("file list of $sub differs; run tool/sync_spec.sh", upstream.keys.sorted(), vendored.keys.sorted())

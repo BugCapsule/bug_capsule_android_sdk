@@ -135,6 +135,8 @@ class RemoteConfigController(
     val maxBackoffMs: Long = 30 * 60_000L,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val random: Random = Random(),
+    /** The backend refused the credential (401/403); called once until a fetch succeeds again. */
+    private val onRejected: ((ConfigFetchResult.Failed) -> Unit)? = null,
 ) {
     @Volatile
     var current: RemoteCaptureConfig? = null
@@ -142,6 +144,16 @@ class RemoteConfigController(
 
     @Volatile
     var keyRejected = false
+        private set
+
+    /** The last failed fetch; null after a success. */
+    @Volatile
+    var lastFailure: ConfigFetchResult.Failed? = null
+        private set
+
+    /** Wall clock (epoch ms) of the last successful fetch in this process (not from the cache). */
+    @Volatile
+    var fetchedThisSession: Long? = null
         private set
     private var failures = 0
     private var timer: Cancellable? = null
@@ -184,6 +196,8 @@ class RemoteConfigController(
         when (result) {
             is ConfigFetchResult.Fetched -> {
                 failures = 0
+                lastFailure = null
+                fetchedThisSession = nowMs()
                 val previous = current
                 current = result.config
                 keyRejected = false
@@ -197,9 +211,19 @@ class RemoteConfigController(
             }
             is ConfigFetchResult.Failed -> {
                 failures++
+                lastFailure = result
                 if (result.unauthorized && !keyRejected) {
                     keyRejected = true
-                    log("ingest key rejected (HTTP ${result.status}); capture stopped for this session")
+                    val report = onRejected
+                    if (report == null) {
+                        log("ingest key rejected (HTTP ${result.status}); capture stopped for this session")
+                    } else {
+                        try {
+                            report(result)
+                        } catch (_: Exception) {
+                            // diagnostics never break the SDK
+                        }
+                    }
                     val previous = current
                     notify(previous, disabledLike(previous), true)
                 }
@@ -273,6 +297,14 @@ internal object SdkLog {
     fun w(message: String) {
         try {
             Log.w(TAG, message)
+        } catch (_: Throwable) {
+            System.err.println("[bugcapsule] $message")
+        }
+    }
+
+    fun e(message: String) {
+        try {
+            Log.e(TAG, message)
         } catch (_: Throwable) {
             System.err.println("[bugcapsule] $message")
         }
