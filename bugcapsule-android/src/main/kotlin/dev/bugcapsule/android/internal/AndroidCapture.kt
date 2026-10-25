@@ -1,6 +1,8 @@
 package dev.bugcapsule.android.internal
 
 import android.annotation.SuppressLint
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import android.app.Activity
 import android.app.Application
 import android.os.Build
@@ -122,6 +124,7 @@ internal class RecordingWindowCallback(
     private val runtime: Runtime,
     activity: Activity,
 ) : Window.Callback {
+    private val decor = WeakReference(activity.window.decorView)
     private val density = activity.resources.displayMetrics.density.takeIf { it > 0 } ?: 1f
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
@@ -151,6 +154,9 @@ internal class RecordingWindowCallback(
                     else -> "touch"
                 },
             )
+            decor.get()?.let { ViewCompat.getRootWindowInsets(it) }?.let {
+                data["imeVisible"] = it.isVisible(WindowInsetsCompat.Type.ime())
+            }
             if (event.buttonState != 0 && event.buttonState != MotionEvent.BUTTON_PRIMARY) data["buttons"] = event.buttonState
             runtime.record(EventTypes.POINTER, data)
         }

@@ -1,5 +1,9 @@
 package dev.bugcapsule.android.replay
 
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import android.app.Activity
 import android.app.Instrumentation
 import android.os.SystemClock
@@ -41,6 +45,36 @@ class InstrumentationReplayDriver(private val instrumentation: Instrumentation) 
     }
 
     private fun round2(v: Double) = Math.round(v * 100) / 100.0
+
+    override fun preparePointer(imeVisible: Boolean) {
+        val activeScenario = checkNotNull(scenario) { "No activity for keyboard synchronization" }
+        var matched = false
+        var requested = false
+        val deadline = SystemClock.uptimeMillis() + 2_000
+        do {
+            activeScenario.onActivity { activity ->
+                val decor = activity.window.decorView
+                val insets = checkNotNull(ViewCompat.getRootWindowInsets(decor)) { "Window insets unavailable" }
+                matched = insets.isVisible(WindowInsetsCompat.Type.ime()) == imeVisible
+                if (!matched && !requested) {
+                    val imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    if (imeVisible) {
+                        val focus = checkNotNull(activity.currentFocus) { "No focused view for recorded keyboard" }
+                        imm.showSoftInput(focus, InputMethodManager.SHOW_IMPLICIT)
+                    } else {
+                        imm.hideSoftInputFromWindow(decor.windowToken, 0)
+                    }
+                    requested = true
+                }
+            }
+            if (matched) {
+                instrumentation.waitForIdleSync()
+                return
+            }
+            SystemClock.sleep(16)
+        } while (SystemClock.uptimeMillis() < deadline)
+        error("Recorded keyboard visibility ($imeVisible) was not restored before pointer injection")
+    }
 
     override fun dispatchPointer(phase: String, pointer: Int, xPx: Float, yPx: Float, kind: String, buttons: Int) {
         toolType = when (kind) {

@@ -46,6 +46,45 @@ class ReplayEngineTest {
     }
 
     @Test
+    fun restoresRecordedKeyboardBeforeGestureButNotBeforeRelease() {
+        val calls = mutableListOf<String>()
+        val delegate = FakeDriver()
+        val driver = object : ReplayDriver by delegate {
+            override fun preparePointer(imeVisible: Boolean) { calls.add("ime:$imeVisible") }
+            override fun dispatchPointer(phase: String, pointer: Int, xPx: Float, yPx: Float, kind: String, buttons: Int) {
+                calls.add(phase)
+            }
+        }
+        fun input(seq: Long, phase: String, visible: Boolean) = pointer(seq, seq, phase).let {
+            it.copy(data = it.data + ("imeVisible" to visible))
+        }
+        val report = engine(listOf(input(1, "down", true), input(2, "up", false), input(3, "down", false), input(4, "up", false))).run(driver)
+        assertEquals(listOf("ime:true", "down", "up", "ime:false", "down", "up"), calls)
+        assertEquals(4, report.eventsDispatched)
+    }
+
+    @Test
+    fun olderCapsulesDoNotGuessKeyboardVisibility() {
+        val driver = object : ReplayDriver by FakeDriver() {
+            override fun preparePointer(imeVisible: Boolean) { error("Unexpected keyboard change") }
+        }
+        val report = engine(listOf(pointer(1, 1, "down"), pointer(2, 2, "up"))).run(driver)
+        assertEquals(2, report.eventsDispatched)
+        assertTrue(report.divergences.none { it.type == "dispatch.error" })
+    }
+
+    @Test
+    fun keyboardSynchronizationFailureIsNotCountedAsInjectedInput() {
+        val driver = object : ReplayDriver by FakeDriver() {
+            override fun preparePointer(imeVisible: Boolean) { error("Keyboard still covers application") }
+        }
+        val event = pointer(1, 1, "down").let { it.copy(data = it.data + ("imeVisible" to false)) }
+        val report = engine(listOf(event)).run(driver)
+        assertEquals(0, report.eventsDispatched)
+        assertTrue(report.divergences.any { it.type == "dispatch.error" })
+    }
+
+    @Test
     fun semanticStrategyWhenScreenDiffersAndActionsExist() {
         var invoked = 0
         actions.register("cart.checkout") { invoked++ }

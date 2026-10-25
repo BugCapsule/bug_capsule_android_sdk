@@ -63,13 +63,13 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.3")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.3")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.3")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.3")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.3")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.3")    // optional: SQLite / Room spans
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.3")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.4")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.4")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.4")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.4")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.4")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.4")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.4")
 }
 ```
 
@@ -400,7 +400,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.3" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.4" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
@@ -492,3 +492,7 @@ Questions or access requests: [contact@bugcapsule.com](mailto:contact@bugcapsule
 
 This SDK is proprietary software of Bug Capsule. Use, copying, modification
 and distribution require prior written permission. See [LICENSE](LICENSE).
+
+### Keyboard state during pointer replay
+
+Version 0.4.1-beta.4 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
