@@ -9,7 +9,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.Choreographer
 import android.view.View
-import android.view.ViewTreeObserver
 import android.view.Window
 import androidx.metrics.performance.JankStats
 import dev.bugcapsule.android.BugCapsuleConfig
@@ -198,17 +197,9 @@ internal class ScreenTracer(
 
     private fun onFirstFrame(activity: Activity, block: () -> Unit) {
         val decor = activity.window?.decorView ?: return afterNextFrame(block)
-        val listener = object : ViewTreeObserver.OnDrawListener {
-            var done = false
-            override fun onDraw() {
-                if (done) return
-                done = true
-                // The frame is on screen once the draw pass is over.
-                main.postAtFrontOfQueue { guard(block) }
-                decor.post { decor.viewTreeObserver.removeOnDrawListener(this) }
-            }
+        dev.bugcapsule.android.internal.onFirstDraw(decor) {
+            main.postAtFrontOfQueue { guard(block) }
         }
-        decor.viewTreeObserver.addOnDrawListener(listener)
     }
 
     private fun afterNextFrame(block: () -> Unit) {
