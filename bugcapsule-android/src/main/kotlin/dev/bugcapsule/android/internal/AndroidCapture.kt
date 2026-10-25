@@ -13,7 +13,6 @@ import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.SearchEvent
 import android.view.View
-import android.view.ViewTreeObserver
 import android.view.Window
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -102,17 +101,7 @@ internal class AndroidCapture(private val runtime: Runtime, private val host: Ho
     private fun anchorOnFirstDraw(activity: Activity) {
         anchored = true
         val decor = activity.window?.decorView ?: return runtime.onFirstDraw()
-        val listener = object : ViewTreeObserver.OnDrawListener {
-            var done = false
-            override fun onDraw() {
-                if (done) return
-                done = true
-                runtime.onFirstDraw()
-                // Listeners cannot be removed while drawing.
-                decor.post { decor.viewTreeObserver.removeOnDrawListener(this) }
-            }
-        }
-        decor.viewTreeObserver.addOnDrawListener(listener)
+        onFirstDraw(decor) { runtime.onFirstDraw() }
     }
 
     private inline fun guard(block: () -> Unit) {
