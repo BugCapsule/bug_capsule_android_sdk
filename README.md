@@ -1,37 +1,114 @@
-# BugCapsule for Android
+# BugCapsule Android SDK
 
-BugCapsule turns a failure seen in QA into a portable `.bugcapsule` file that a
-developer can **replay against the real app code** on an emulator, **verify**
-after a fix, and keep as a **regression test**. It also does production
-**monitoring** (error events with ANRs and native crashes, release-health
-sessions, performance tracing, user feedback; see [Monitoring](#monitoring)),
-linking each error to the capsule that replays it. This repository is the native
-Android SDK (Kotlin, Java-friendly API), its instrumentation replay runner, and
-a demo shop app. The capsule format and protocols are defined in
-`bug_capsule_flutter_sdk/spec/capsule-v1.md` and `spec/runtimes-v1.md`; the
-`bugcapsule` CLI (Dart) drives replay through `AndroidLauncher`.
+BugCapsule records what led up to a bug in your Android app and saves it as a
+portable `.bugcapsule` file. A developer can **replay** that file on an
+emulator against the real app code, **verify** a fix against it, and keep it
+as a **regression test**. The same SDK also reports errors (including ANRs and
+native crashes), release health, performance traces and user feedback, and
+links each error to the capsule that replays it.
 
-| Artifact (`io.github.bugcapsule:…:0.4.1-beta.1`) | What it is |
+```
+QA hits a bug      ─► capsule captured, redacted on the device, uploaded
+bugcapsule run     ─► REPRODUCED 3/3   (instrumentation test on an emulator)
+fix the code
+bugcapsule verify  ─► FIXED 3/3
+bugcapsule regress ─► runs in CI from now on
+```
+
+Kotlin-first, with a Java-friendly API.
+
+📖 Full documentation: **[docs.bugcapsule.com/android](https://docs.bugcapsule.com/android.html)**
+
+## Contents
+
+- [Artifacts](#artifacts)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Connect your app](#connect-your-app)
+- [Make bugs replayable](#make-bugs-replayable)
+- [Replay, verify and keep a regression test](#replay-verify-and-keep-a-regression-test)
+- [Monitoring](#monitoring)
+- [Privacy](#privacy)
+- [Going to production](#going-to-production)
+- [Limitations](#limitations)
+- [Demo app](#demo-app)
+- [More documentation](#more-documentation)
+- [Support and license](#support-and-license)
+
+## Artifacts
+
+All artifacts are on Maven Central under the group `io.github.bugcapsule`.
+Keep them on the same version.
+
+| Artifact | What it is |
 |---|---|
-| `bugcapsule-android` | Core: capsule model/codec/validator, recorder, redaction, request keys, remote config, outbox, capture (lifecycle, pointers, Back key, failures, crashes), replay engine, Views helpers, SharedPreferences and Preferences DataStore checkpoints, state serializers/restorers (incl. ViewModels) |
-| `bugcapsule-okhttp` | OkHttp capture and deterministic replay (Retrofit works through it); `http.client` spans and trace propagation |
-| `bugcapsule-navigation` | Jetpack Navigation: route events, checkpoint, restore; `navigation` transactions |
-| `bugcapsule-compose` | Compose helpers: semantic actions, tracked text, navigation effect, screen tracing, feedback sheet |
-| `bugcapsule-ndk` | NDK crash handler (signal handler writing a crash record, sent on next launch) |
-| `bugcapsule-sqlite` | SQLite / Room `db.sql.query` spans (`SupportSQLiteOpenHelper.Factory` wrapper) |
-| Gradle plugin `io.github.bugcapsule.gradle` | R8/ProGuard mapping UUID in the APK + `mapping.txt` upload (`bugcapsule-gradle-plugin/`, an included build) |
-| `bugcapsule-android-replay` | **androidTest only**: `BugCapsuleReplayRunner` (an `AndroidJUnitRunner`) and `BugCapsuleReplayTest` |
+| `bugcapsule-android` | The SDK: capture, upload, replay engine, monitoring, Views helpers, SharedPreferences / DataStore checkpoints, ViewModel state |
+| `bugcapsule-okhttp` | OkHttp (and Retrofit) capture and replay, HTTP spans and trace propagation |
+| `bugcapsule-navigation` | Jetpack Navigation routes, back-stack restore, navigation transactions |
+| `bugcapsule-compose` | Compose helpers: actions, tracked text, navigation, screen tracing, feedback sheet |
+| `bugcapsule-ndk` | Native (NDK) crash reporting (optional) |
+| `bugcapsule-sqlite` | SQLite / Room query spans (optional) |
+| `bugcapsule-android-replay` | **androidTest only**: the replay runner the CLI uses |
+| Gradle plugin `io.github.bugcapsule.gradle` | Uploads R8/ProGuard mappings so stack traces from minified builds are readable (optional) |
 
-Requirements: minSdk 23, compileSdk 34+, Kotlin or Java 17 bytecode. Preferences
-DataStore checkpoints need `androidx.datastore:datastore-preferences` 1.1+ in the app.
+## Requirements
 
-## Quickstart
+- A BugCapsule project. Sign in at [app.bugcapsule.com](https://app.bugcapsule.com).
+- minSdk 23, compileSdk 34+, JDK 17.
+- An emulator for replay (API 35 is the tested level).
+- Preferences DataStore checkpoints need `androidx.datastore:datastore-preferences` 1.1+.
 
-### 1. Connect with one token
+## Install
 
-Copy the **SDK token** (`bcsdk.v1.…`) from the BugCapsule dashboard
-(Project settings → Keys → SDK tokens). It carries the API URL and an upload-only
-credential, so it is the only value the app needs:
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.1")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.1")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.1")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.1")
+}
+```
+
+Make sure `mavenCentral()` is in your repositories. Java and Kotlin packages
+are `dev.bugcapsule.*`.
+
+> **Versions.** The latest release on Maven Central is `0.4.1-beta.1`. This
+> README describes `main`. **SDK tokens** (`token`) and **`BugCapsule.status()`**
+> ship in the next release. On `0.4.1-beta.1`, connect with an
+> [explicit address and ingest key](#connect-with-an-address-and-ingest-key)
+> instead.
+
+## Connect your app
+
+### 1. Get an SDK token
+
+In the dashboard, open **Project settings → Keys → SDK tokens** and generate a
+token. It looks like `bcsdk.v1.…` and is shown once, so copy it right away.
+
+The SDK token is the only value your app needs. It holds your BugCapsule
+address and a send-only credential: it can upload capsules and events and read
+capture settings, nothing else. That makes it safe to ship in the APK. You can
+rotate or revoke it in the dashboard at any time.
+
+Pass it in as a `BuildConfig` field, so it comes from the environment or CI
+secrets rather than your sources:
+
+```kotlin
+// app/build.gradle.kts
+android {
+    defaultConfig {
+        buildConfigField("String", "BUGCAPSULE_TOKEN",
+            "\"${providers.environmentVariable("BUGCAPSULE_SDK_TOKEN").getOrElse("")}\"")
+    }
+    buildFeatures.buildConfig = true
+}
+```
+
+### 2. Initialize first in `Application.onCreate`
 
 ```kotlin
 class ShopApp : Application() {
@@ -46,50 +123,79 @@ class ShopApp : Application() {
 BugCapsule.init(this, BuildConfig.BUGCAPSULE_TOKEN);   // Java
 ```
 
-Call it first in `Application.onCreate` (not from a ContentProvider or App
-Startup initializer: replay restores storage right before
-`Application.onCreate`). `BUGCAPSULE_TOKEN` is a `buildConfigField` (step 2);
-a string literal works too, the token ships inside the app anyway.
+That is a complete connection. Capture and monitoring (errors, ANRs,
+sessions, screen tracing) start automatically, and the app version and build
+come from the package info.
 
-That's the whole setup: capsule capture and monitoring (errors, ANRs,
-sessions, screen tracing) start automatically, the configuration is fetched
-in the background, and app version / build come from the package info. The
-token is client-visible like an ingest key: it can only fetch the project's
-SDK configuration and upload Capsules and events. It never reads data and
-never reaches the console. Never put a `bcs_` secret key in an app.
+- **Call it first in `Application.onCreate`**, not from a ContentProvider or an
+  App Startup initializer: replay restores storage right before
+  `Application.onCreate`.
+- **It never breaks your app.** `init` never throws and never blocks on the
+  network. A token that can't be used logs one line under the `BugCapsule` tag
+  saying what to fix, and the app runs without uploads.
 
-`init` never throws, never blocks on the network and never stops the app
-from starting. A token that can't be used (empty, damaged, a bare `bci_`/`bct_`
-key pasted instead of the token, or a newer token version) logs one line under
-the `BugCapsule` tag with what to do, the app runs without the backend, and
-`BugCapsule.status()` reports `invalid_token` / `unsupported_token_version`.
-
-### 2. Add the progressive adapters
-
-The token proves connectivity; replay needs the app's inputs too. Add the
-artifacts and pass their integrations (any you skip show up as `missing` in
-`BugCapsule.status()`):
+### 3. Check the connection
 
 ```kotlin
-// build.gradle.kts (app)
+val status = BugCapsule.status()
+Log.i("Shop", "BugCapsule ${status.connection.state.code}: ${status.connection.message ?: "ok"}, " +
+    "missing ${status.instrumentation.missing}")
+```
+
+`status.connection` has two separate confirmations: `configFetchedAt` (the app
+reached BugCapsule with a valid token) and `firstEventAcceptedAt` /
+`firstCapsuleAcceptedAt` (captured data arrived).
+
+| `state` | Meaning | What to do |
+|---|---|---|
+| `not_configured` | No token and no backend: capsules stay on the device. | Pass a token. |
+| `invalid_token` / `unsupported_token_version` | The token can't be used; `message` says why. | Paste the full `bcsdk.v1.…` token, or update the SDK. |
+| `connecting` | The configuration hasn't arrived yet. | Wait a moment. |
+| `connected` | BugCapsule answered the configuration request. | Nothing. |
+| `offline` | No network, a timeout or a server error. Data waits in the outbox and is retried. | Check the device's network. |
+| `rejected` | The token was refused (`reason`: `token_revoked`, `token_expired`, `token_unknown`, …). Capture and uploads stop for this app session. | Generate a new token. |
+| `disabled` | `enabled(false)`, the project's kill switch, or a replay run. | — |
+
+### Connect with an address and ingest key
+
+For self-hosted setups, older SDK versions, or apps that already pass an
+address explicitly:
+
+```kotlin
+BugCapsuleConfig.builder()
+    .backend("https://api.bugcapsule.com", BuildConfig.BUGCAPSULE_INGEST_KEY)   // bct_… or bci_…
+    .build()
+```
+
+The explicit backend wins when both are set (the SDK logs that the token was
+ignored). The ingest key is public like the token. **Never put a `bcs_…` secret
+key in an app.**
+
+On an emulator, a BugCapsule server running on your own computer is
+`10.0.2.2`, not `127.0.0.1`.
+
+## Make bugs replayable
+
+Being connected is not the same as faithful replay. Replay also needs your
+app's network, navigation and state. Add the adapters that match your app;
+`BugCapsule.status().instrumentation.missing` tells you what is left.
+
+| Adapter | Gives replay |
+|---|---|
+| `BugCapsuleOkHttp` (`bugcapsule-okhttp`) | Network: OkHttp and Retrofit |
+| `BugCapsuleNavigation` (`bugcapsule-navigation`) | Routes and back-stack restore |
+| `BugCapsuleSharedPreferences`, `BugCapsuleDataStore`, `registerState`, `registerViewModel` | App state in checkpoints |
+| `bugcapsule-compose` helpers | Actions, tracked text, screens in Compose |
+
+```kotlin
+// app/build.gradle.kts: the replay runner and the build's commit
 android {
     defaultConfig {
         testInstrumentationRunner = "dev.bugcapsule.android.replay.BugCapsuleReplayRunner"
-        // The token comes from the environment / CI secrets, never from sources.
-        buildConfigField("String", "BUGCAPSULE_TOKEN", "\"${providers.environmentVariable("BUGCAPSULE_SDK_TOKEN").getOrElse("")}\"")
         // The CLI passes -PbugcapsuleGitSha=<sha> so capsules and replays carry the build's commit.
-        buildConfigField("String", "BUGCAPSULE_GIT_SHA", "\"${providers.gradleProperty("bugcapsuleGitSha").getOrElse("")}\"")
+        buildConfigField("String", "BUGCAPSULE_GIT_SHA",
+            "\"${providers.gradleProperty("bugcapsuleGitSha").getOrElse("")}\"")
     }
-    buildFeatures.buildConfig = true
-}
-dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.1")       // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.1")           // native crash events (optional)
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.1")        // SQLite / Room spans (optional)
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.1")
 }
 ```
 
@@ -97,23 +203,26 @@ dependencies {
 class ShopApp : Application() {
     override fun onCreate() {
         super.onCreate()
-        // First thing in Application.onCreate (not a ContentProvider / App Startup
-        // initializer): replay restores storage right before Application.onCreate.
         BugCapsule.init(
             this,
             BugCapsuleConfig.builder()
-                .token(BuildConfig.BUGCAPSULE_TOKEN)        // bcsdk.v1.… from the dashboard
-                .mode(CaptureMode.QA)                       // default: DEBUG if debuggable, else PRODUCTION
+                .token(BuildConfig.BUGCAPSULE_TOKEN)
+                .mode(CaptureMode.QA)                     // default: DEBUG if debuggable, else PRODUCTION
                 .gitSha(BuildConfig.BUGCAPSULE_GIT_SHA)
                 .redactKeys("loyaltyId")
                 .build(),
-            listOf(okHttp, navigation,
+            listOf(
+                okHttp,
+                navigation,
                 BugCapsuleSharedPreferences.builder().allowFile("shop_prefs").build(),
-                BugCapsuleDataStore.builder().allow("settings").build()),
+                BugCapsuleDataStore.builder().allow("settings").build(),
+            ),
         )
     }
+
     companion object {
         val okHttp = BugCapsuleOkHttp(rules = listOf(
+            // Fields that change on every run must not affect request matching.
             EndpointRule("POST", "/api/checkout", ignoreBodyFields = setOf("timestamp", "nonce"))))
         val navigation = BugCapsuleNavigation()
     }
@@ -121,18 +230,43 @@ class ShopApp : Application() {
 
 val client = OkHttpClient.Builder()
     .addInterceptor(AuthInterceptor())          // your interceptors first: they still run in replay
-    .addInterceptor(ShopApp.okHttp.interceptor) // BugCapsule: the innermost application interceptor
+    .addInterceptor(ShopApp.okHttp.interceptor) // BugCapsule last: the innermost application interceptor
     .build()
 ```
 
-| Adapter | Gives replay | Detected by `status().instrumentation` |
-|---|---|---|
-| `bugcapsule-okhttp` (`BugCapsuleOkHttp`) | network fixtures (OkHttp, Retrofit) | `network` |
-| `bugcapsule-navigation` (`BugCapsuleNavigation`) | routes, back stack restore | `navigation` |
-| `BugCapsuleSharedPreferences` / `BugCapsuleDataStore`, `registerState` / `registerViewModel` | app state in checkpoints | `appState` |
-| `bugcapsule-compose` helpers | semantic actions, tracked text, screens | `frameworks` contains `compose` (after first composition) |
-| `bugcapsule-ndk` | native crash events | `nativeCrashes` |
-| `bugcapsule-sqlite` | `db.sql.query` spans | not detectable (a `SupportSQLiteOpenHelper.Factory` wrapper) |
+### Actions, text, assertions and state
+
+```kotlin
+// Views (password input types are always redacted)
+BugCapsuleViews.onClick(checkoutButton, "cart.checkout") { viewModel.checkout() }
+BugCapsuleViews.trackText(couponField, "cart.coupon")
+
+// Compose
+val coupon = rememberTrackedText("cart.coupon")
+TextField(value = coupon.value, onValueChange = coupon::onValueChange)
+val password = rememberTrackedText("login.password", sensitive = true)
+Button(onClick = rememberBugCapsuleAction("cart.checkout") { viewModel.checkout() }) { Text("Checkout") }
+BugCapsuleNavigationEffect(navController, ShopApp.navigation)
+
+// Jetpack Navigation with Fragments: after the graph is set
+ShopApp.navigation.attach(navHostFragment.navController)
+
+// Say what "broken" means
+BugCapsule.check("cart_total_non_negative", total >= 0, "total $total")
+BugCapsule.fail("checkout_stuck", "spinner for 30 s")
+try { … } catch (e: IllegalStateException) { BugCapsule.reportError(e) }
+
+// State saved in checkpoints and restored in replay
+BugCapsule.registerViewModel(this, "cart", { state.toJson() }) { value -> state = CartState.fromJson(value) }
+BugCapsule.registerState("session", { sessionStore.snapshot() }) { sessionStore.restore(it) }
+
+// Deterministic values: replay returns the recorded ones
+val nonce = BugCapsule.random().nextInt()
+val now = BugCapsule.currentTimeMillis()
+
+// Manual capture, e.g. from a QA button
+BugCapsule.capture(note = "QA: total looks wrong")
+```
 
 Java:
 
@@ -143,491 +277,221 @@ BugCapsuleViews.onClick(button, "cart.checkout", v -> viewModel.checkout());
 BugCapsule.check("cart_total_non_negative", total >= 0, "total " + total);
 ```
 
-### 3. Check the connection: `BugCapsule.status()`
+### What is captured
 
-```kotlin
-val status = BugCapsule.status()
-Log.i("Shop", "BugCapsule ${status.connection.state.code}: ${status.connection.message ?: "ok"}, missing ${status.instrumentation.missing}")
-```
-
-`status.connection` has `state`, `source` (`TOKEN` / `BACKEND`), `apiUrl`,
-`reason`, `message` and two separate confirmations: `configFetchedAt` (the
-backend answered with this app's credential: URL, credential and network are
-right) and `firstEventAcceptedAt` / `firstCapsuleAcceptedAt` (captured data
-reached the project). Neither proves complete replay instrumentation; that is
-`status.instrumentation` (`recording`, `network`, `navigation`, `appState`,
-`nativeCrashes`, `frameworks`, `integrations`, `missing`).
-
-| `state` | Meaning |
+| Area | Captured |
 |---|---|
-| `not_configured` | No token and no backend: capsules stay on the device. |
-| `invalid_token` / `unsupported_token_version` | The token can't be used (`message` says why); the app runs without the backend. |
-| `connecting` | Configured; the configuration has not arrived yet. |
-| `connected` | The backend answered the configuration request. |
-| `offline` | No network, timeout or server error. Data waits in the bounded outbox and is retried with backoff; the app is unaffected. |
-| `rejected` | The backend refused the credential; `reason` is `token_revoked`, `token_expired`, `token_unknown` or `key_unknown_or_revoked` and `message` says what to do. Capture and uploads stop for this app session (one log line). Generate a new token. |
-| `disabled` | `enabled(false)`, the project's remote kill switch, or a replay run. |
+| Lifecycle | Process-level resume, pause and stop (configuration changes ignored) |
+| Touches | Every Activity's touch events, in dp. No accessibility service, no screen recording. |
+| Back key | The system Back key |
+| Actions and text | Only through the helpers above |
+| Navigation | Jetpack Navigation destinations |
+| Network | OkHttp exchanges, with a bounded body prefix (256 KiB text, 64 KiB binary) |
+| Storage | Allowlisted SharedPreferences files/keys and DataStore stores |
+| Failures | `check` / `fail`, `reportError`, and uncaught JVM exceptions on any thread |
 
-### Self-hosted / explicit backend (advanced)
+Uncaught exceptions get a capsule written synchronously and uploaded on the
+next launch; your previous crash handler always still runs. Native crashes,
+ANRs and OOM kills get **no capsule**, but they are still reported by
+[monitoring](#monitoring). Exact boundaries:
+[docs/how-it-works.md](docs/how-it-works.md#failure-capture-boundaries).
 
-A self-hosted backend issues tokens with its own API URL, so the token setup
-above works unchanged. You can still configure the URL and ingest credential
-explicitly; existing apps keep working as they are:
+## Replay, verify and keep a regression test
 
-```kotlin
-BugCapsuleConfig.builder()
-    .backend("https://bugcapsule.example.com", BuildConfig.BUGCAPSULE_INGEST_KEY)   // bct_… or legacy bci_…
-    .build()
+### Install the CLI
+
+The `bugcapsule` CLI replays capsules from every BugCapsule SDK. It is a Dart
+tool shipped in the Flutter package, so it needs
+[Flutter](https://docs.flutter.dev/get-started/install) installed even for
+Android projects.
+
+```bash
+dart pub global activate bug_capsule 0.4.1-beta.1
+bugcapsule --version
 ```
 
-When both `token` and `backend` are set, the explicit backend wins and the SDK
-logs that the token was ignored. On an emulator, the token's API URL must be
-reachable from the device (a backend on the host machine is `10.0.2.2`, not
-`127.0.0.1`); use an explicit backend otherwise.
+If the shell can't find `bugcapsule`, add `~/.pub-cache/bin` to your `PATH`.
 
-### Integration examples
+Log in with a personal token from **Project settings → Keys & CLI access**.
+In CI, use a service token in `BUGCAPSULE_TOKEN` instead.
 
-```kotlin
-// Views: semantic actions and tracked text (password input types are always sensitive).
-BugCapsuleViews.onClick(checkoutButton, "cart.checkout") { viewModel.checkout() }
-BugCapsuleViews.trackText(couponField, "cart.coupon")
-BugCapsuleViews.trackText(passwordField, "login.password")
-
-// Compose
-val coupon = rememberTrackedText("cart.coupon")
-TextField(value = coupon.value, onValueChange = coupon::onValueChange)
-val password = rememberTrackedText("login.password", sensitive = true)
-Button(onClick = rememberBugCapsuleAction("cart.checkout") { viewModel.checkout() }) { Text("Checkout") }
-BugCapsuleNavigationEffect(navController, ShopApp.navigation)
-
-// Jetpack Navigation (Fragments): after the graph is set
-ShopApp.navigation.attach(navHostFragment.navController)
-
-// Assertions, explicit failures, logs
-BugCapsule.check("cart_total_non_negative", total >= 0, "total $total")
-BugCapsule.fail("checkout_stuck", "spinner for 30 s")
-try { … } catch (e: IllegalStateException) { BugCapsule.reportError(e) }
-BugCapsule.log("legacy cache migrated", level = "warn")
-
-// State in periodic checkpoints (restored in replay when registered)
-BugCapsule.registerViewModel(this, "cart", { state.toJson() }) { value -> state = CartState.fromJson(value) }
-BugCapsule.registerState("session", { sessionStore.snapshot() }) { sessionStore.restore(it) }
-BugCapsule.reportState("cart")             // diagnostic `state` event
-
-// Deterministic hooks: replay returns the recorded values
-val nonce = BugCapsule.random().nextInt()
-val now = BugCapsule.currentTimeMillis()
-
-// Manual capture, uploads, remote config
-BugCapsule.capture(note = "QA: total looks wrong")   // Future<CaptureResult?>
-BugCapsule.flushUploads(); BugCapsule.refreshRemoteConfig()
+```bash
+bugcapsule login --url https://api.bugcapsule.com --token bcp_…
 ```
 
-## Supported frameworks
+### Configure replay
 
-Android Views (Activities, Fragments, AppCompat), Jetpack Compose (helpers),
-Jetpack Navigation (Fragment and Compose), OkHttp 4 (and Retrofit on top),
-SharedPreferences, Preferences DataStore, AndroidX ViewModel. Kotlin
-coroutines need nothing special (uncaught coroutine exceptions reach the
-default handler).
-
-## What is captured, and how
-
-* **Lifecycle**, process level through `ActivityLifecycleCallbacks`: first
-  activity resumed → `resumed`, last paused → `inactive`, last stopped →
-  `paused` (configuration changes ignored).
-* **Pointers** by wrapping each Activity's `Window.Callback`
-  (`dispatchTouchEvent`), as screen coordinates divided by density (dp). No
-  accessibility service, no screen recording, no reflection.
-* **Back key** (`key` event, Android extension): the system Back key the
-  window receives (an IME consuming Back is not recorded).
-* **Actions / text** only through the explicit helpers above.
-* **Navigation** destinations (`route`, `source: "navigation"`).
-* **Network**: OkHttp exchanges; the response body source is tapped while the
-  app reads it (same bytes and timing) keeping a bounded prefix (256 KiB text,
-  64 KiB binary); one-shot/duplex request bodies are never read.
-* **Storage**: allowlisted SharedPreferences files/keys and DataStore stores
-  in every checkpoint (launch, then every 30 s).
-* **Failures**: `check`/`fail` assertions, `reportError`, and uncaught JVM
-  exceptions on any thread.
-
-The session anchor (event `t = 0`) is the first drawn frame of the first
-activity; `t` uses `SystemClock.elapsedRealtime()`.
-
-### Failure-capture boundaries (precise)
-
-* **Captured automatically**: uncaught JVM exceptions on any thread, through a
-  chained default `UncaughtExceptionHandler`. The previous handler is **always**
-  called afterwards (the process still dies as before). The crash capsule is
-  encoded and written **synchronously** to app-private storage
-  (`noBackupFilesDir/bugcapsule`) and queued; it is uploaded on the **next
-  launch** — no upload is attempted during process death. Such capsules carry
-  `crash.persisted` (partial). `ActivityThread`'s `RuntimeException("Unable to
-  start activity …")` wrapper is unwrapped to the app's exception.
-* **No capsule for**: native (NDK) crashes, ANRs, `System.exit`/`killProcess`,
-  OOM kills, exceptions the app catches without calling `reportError`, errors
-  inside other processes. Assertions you do not write cannot fire. Native
-  crashes and ANRs are still **monitoring events**, and OOM/force-quit kills
-  in the foreground end the session as `abnormal` (see [Monitoring](#monitoring)).
-* At most 3 automatic capsules per session, one per failure signature; capsules
-  are written 300 ms after the failure (crashes immediately).
-
-## Monitoring
-
-Implements [`monitoring-v1`](../bug_capsule_backend/docs/monitoring-v1.md):
-error events, release-health sessions, transactions and feedback, sent as
-gzip envelopes to `POST /v1/envelope` with the same credential. It runs in
-every capture session, **whether or not the session records a capsule**
-(production sampling only applies to capsules), never during replay, and
-`enabled(false)` / `monitoring(false)` turn it off.
-
-```kotlin
-BugCapsuleConfig.builder()
-    .token(BuildConfig.BUGCAPSULE_TOKEN)
-    // release defaults to "<appId>@<versionName>+<versionCode>", environment to production/qa/development by mode
-    .tracesSampleRate(0.2)                          // or .tracesSampler { ctx -> if (ctx.op == "app.start.cold") 1.0 else null }
-    .tracePropagationTargets("api.shop.com", "/^https://.*\\.internal\\//")  // none by default
-    .errorSampleRate(1.0)                           // fatal and capsule-linked events are always sent
-    .inAppIncludes("com.shop").inAppExcludes("com.shop.vendor")   // default: the app id
-    .beforeSend { event, hint -> if (hint.throwable is CancellationException) null else event }
-    .beforeBreadcrumb { crumb -> crumb.takeUnless { it.category == "ui.input" } }
-    .enableTimeToFullDisplayTracing(true)           // screens wait for BugCapsule.reportFullyDrawn()
-    .enableShakeToReport(true)                      // shake opens the feedback dialog
-    .build()
-```
-
-```kotlin
-BugCapsule.captureException(e, CaptureOptions(tags = mapOf("flow" to "checkout"), fingerprint = listOf("cart-total")))
-BugCapsule.captureMessage("legacy cart migrated", Level.WARNING)
-BugCapsule.reportError(e)                         // failure: capsule + event, linked both ways
-BugCapsule.setUser(User(id = "u_123", segment = "pro")); BugCapsule.setTag("plan", "pro")
-BugCapsule.setContext("cart", mapOf("items" to 3)); BugCapsule.addBreadcrumb("coupon applied", "cart")
-BugCapsule.withScope { scope -> scope.setTag("job", "sync"); BugCapsule.captureMessage("sync failed") }
-BugCapsule.lastEventId(); BugCapsule.flush(5_000); BugCapsule.close()
-
-val tx = BugCapsule.startTransaction("checkout", "task", bindToScope = true)
-val span = tx.startChild("serialize", "cart"); span.setData("items", 3); span.finish(); tx.finish()
-BugCapsule.startSpan("price cart", "task") { span -> repriceCart() }
-val ctx = BugCapsule.continueTrace(incomingTraceparent, incomingBaggage)   // then startTransaction(..., context = ctx)
-BugCapsule.getTraceparent(); BugCapsule.getBaggage()                     // for clients other than OkHttp
-BugCapsule.reportFullyDrawn()                                            // TTFD of the current screen
-
-BugCapsule.captureFeedback("Checkout button did nothing", name = "Ana", email = "ana@example.com", eventId = BugCapsule.lastEventId())
-BugCapsuleFeedbackDialog.show(activity)                                   // Views form
-if (show) BugCapsuleFeedbackSheet(onDismiss = { show = false })          // Compose (Material 3 sheet)
-BugCapsuleScreen("Checkout"); BugCapsuleFullyDrawn(ready = state.loaded) // Compose screen transaction + TTFD
-```
-
-What is sent, and how:
-
-* **Errors** (`event`): uncaught JVM exceptions (`fatal`, mechanism
-  `uncaught`, written synchronously and sent next launch), `reportError` /
-  `check` / `fail` failures, `captureException` / `captureMessage`, **ANRs**
-  (watchdog: main thread blocked 5 s in the foreground, mechanism `anr`, main
-  thread stack in `threads`) and **native crashes** with `bugcapsule-ndk`
-  (mechanism `signal`, frames with `instructionAddr`: the exact PC for the
-  crashing frame, return address − 1 for callers; `elf` debug images with
-  GNU build ids, the crashed process's release). Exception chains are
-  innermost cause first, frames oldest first; `inApp` from the app id or
-  `inAppIncludes`/`inAppExcludes`; `debugImages` carries the `proguard` UUID
-  from `assets/bugcapsule-debug-meta.properties`. Contexts: `device`, `os`,
-  `app`, `culture`, `screen`, `trace`.
-* **Capsule link**: when a failure also writes a capsule, the event carries
-  `capsuleId` and the capsule `manifest.monitoring = {eventId, traceId,
-  release, environment}`; a manual `capture()` links the last failure's event.
-* **Breadcrumbs** come from the flight recorder (route, action, text field
-  id, Back key, http, lifecycle, log, state, failure), so nothing is
-  instrumented twice; sessions that do not record a capsule still record
-  these light events (OkHttp then records only method, URL, status, duration).
-* **Sessions** (`session`): one per foreground run, ended 30 s after going to
-  the background (`exited`), `crashed` on an uncaught or native crash,
-  `abnormal` when the process died in the foreground (detected on the next
-  launch); the first error and the crash are sent with the event; `did` is
-  `user.id` or a random install id. `startSession()` / `endSession()` for
-  apps that manage it.
-* **Tracing** (`transaction`): activities (`ui.load`, spans
-  `ui.load.initial_display` at the first frame and `ui.load.full_display` at
-  `reportFullyDrawn`, measurements `time_to_initial_display` /
-  `time_to_full_display`), cold/warm app start (`app.start.cold|warm` span,
-  `app_start_cold|warm`), fragments (child `ui.load` spans), Navigation
-  destinations (`navigation`, named by route pattern), Compose screens,
-  frames from JankStats (`frames_total|slow|frozen`, `frames_delay`), OkHttp
-  `http.client` spans, SQLite/Room `db.sql.query` spans, `ui.action.click`
-  for semantic actions (`enableUserInteractionTracing`). Screen transactions
-  finish 3 s after their last span (at most 30 s) or when the activity
-  pauses. Sampling is decided once at the root and propagated.
-* **Trace propagation**: OkHttp requests to `tracePropagationTargets` get
-  `traceparent` (unless the app set one) and `baggage` (app entries kept).
-  Never in replay; the recorded request headers and request keys are the
-  app's own, so replay keys are unchanged.
-* **Feedback** (`feedback`): `captureFeedback`, the Views dialog, the Compose
-  sheet, shake to report; in QA mode (`captureCapsuleWithFeedback`) a capsule
-  is written too and linked by `capsuleId`.
-
-Delivery: a separate persisted outbox (`noBackupFilesDir/bugcapsule/monitoring/envelopes`,
-30 envelopes / 5 MiB / 7 days), sent 2 s after a write, on foreground and
-background, and by `flush()`; the capsule outbox rules apply (only after a
-config fetch, backoff 30 s → 1 h, `Retry-After`, 4xx dropped, items rejected
-in a `200` never retried). Items over 1 MiB lose breadcrumbs, then spans and
-frames, or are dropped. **Every item is redacted with the capsule rules
-before it is written** (ids and timestamps are kept as they are).
-
-Remote config (`/v1/sdk/config`): `monitoringEnabled: false` stops envelopes
-and deletes queued ones (capsules unaffected; `enabled: false` stops both);
-`errorSampleRate`, `tracesSampleRate` (overrides the app's rate unless it set
-a `tracesSampler`), `sessionTracking`, `maxBreadcrumbs`,
-`tracePropagationTargets` (replaces the app's list).
-
-### Native crashes (`bugcapsule-ndk`)
-
-Add the artifact: `BugCapsule.init` installs it by reflection
-(`enableNativeCrashHandling`, default on). A `sigaction` handler (SIGSEGV,
-SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP; not SIGQUIT, which ART uses for ANR
-dumps) on an alternate stack writes a text record with `write(2)` (signal,
-code, fault address, thread, up to 64 frames from `_Unwind_Backtrace` +
-`dladdr`) and chains to the previous handler, so tombstones and other
-handlers still run. Limits: `dladdr`/the unwinder are not formally
-async-signal-safe (best effort); stack overflows on threads without an
-alternate signal stack cannot be recorded; symbols are the nearest exported
-ones until unstripped `.so` files are uploaded (`kind=elf`).
-
-### Gradle plugin: ProGuard/R8 mapping upload
-
-The `io.github.bugcapsule.gradle` plugin lets the backend deobfuscate stack traces
-of minified builds. For every variant with `isMinifyEnabled = true` it writes
-`assets/bugcapsule-debug-meta.properties` (`proguardUuid=<uuid>`, derived from
-`mapping.txt`: the same mapping always gets the same id; the SDK sends it as a
-`proguard` debug image) and uploads the gzipped `mapping.txt` to
-`POST <url>/v1/debug-files?kind=proguard&debugId=<uuid>` after
-`assemble<Variant>` / `bundle<Variant>`.
-
-```kotlin
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.1" }
-bugcapsule {
-    url.set("https://bugcapsule.example.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
-    // secretKey: -PbugcapsuleSecretKey or BUGCAPSULE_SECRET_KEY (a bcs_… key: CI secrets only, never in the app)
-    uploadProguardMapping.set(true)              // automatic upload when url and key are set
-    failOnUploadError.set(true)                  // false: only warn
-}
-```
-
-Without a url or key the id is still embedded and the upload is skipped; run
-`./gradlew uploadBugCapsuleProguardMapping<Variant>` to upload by hand.
-Re-uploading the same id replaces the file. Until the plugin is published,
-use it as an included build (`pluginManagement { includeBuild("…/bugcapsule-gradle-plugin") }`).
-
-### SQLite / Room (`bugcapsule-sqlite`)
-
-```kotlin
-Room.databaseBuilder(context, ShopDb::class.java, "shop.db")
-    .openHelperFactory(BugCapsuleSQLiteOpenHelperFactory(FrameworkSQLiteOpenHelperFactory()))
-    .build()
-```
-
-Queries, statements and insert/update/delete running while a span is active
-become `db.sql.query` spans (description: the SQL; bound arguments are never
-recorded).
-
-## Replay
-
-```
-bugcapsule run <capsule> -n 3          # expects REPRODUCED
-bugcapsule verify <capsule> -n 3       # after a fix: FIXED only if every attempt is valid and clean
-bugcapsule regress add <capsule> && bugcapsule regress run
-```
-
-Per attempt the CLI clears the app (`pm clear`), forwards its loopback server
-(`adb reverse tcp:<port>`), and runs
-`am instrument -r -w -e bugcapsuleReplayUrl <url> -e class
-dev.bugcapsule.android.replay.BugCapsuleReplayTest <testAppId>/<runner>`.
-`BugCapsuleReplayRunner.onCreate` (before `Application.onCreate`) fetches the
-capsule, **refuses unless the app is debuggable**, and restores
-SharedPreferences/DataStore; `BugCapsule.init` then starts in replay mode; the
-test launches the launcher activity with `ActivityScenario` and runs the
-in-app engine: pointers via `Instrumentation.sendPointerSync` (dp → px, scaled
-if the screen differs), Back via `sendKeySync`, actions/text on the main
-thread, lifecycle by moving the scenario (`resumed`→RESUMED, `inactive`→STARTED,
-`paused`→CREATED). OkHttp requests are answered from the capsule by key +
-occurrence after the recorded latency (strict: unrecorded → `ConnectException`
-+ `network.unrecorded`). The result goes to `POST <base>/result` and to the
-instrumentation status `bugcapsule_result=BUGCAPSULE_RESULT::{json}`; a
-replayed crash reports synchronously from the crash handler before the
-process dies. Long idle stretches are compressed; recorded latency is kept.
-
-**Production protection**: replay can only be armed from an `Instrumentation`
-(the runner ships in the androidTest APK only) for a debuggable app. There is
-no intent, deep link, URL, push or file path into replay.
-
-## Privacy controls
-
-Redaction happens on device before anything is written (capsule-v1
-*Redaction*, conformance-tested against the Dart reference): sensitive keys
-anywhere in bodies/storage/state/payloads, sensitive headers, URL user info and
-sensitive query/fragment parameters, credentials in free text (bearer/basic,
-JWTs, API key formats, `key=value` pairs, Luhn-valid card numbers). Add rules
-with `redactKeys`, `redactHeaders`, `redactPattern(...)`; drop or rewrite with
-`beforeRecord` / `beforeCheckpoint`; exclude endpoints with
-`BugCapsuleOkHttp(exclude = …)`; allowlist storage (nothing is captured unless
-allowlisted); mark text fields `sensitive` (password input types are forced).
-Remote config can disable body capture (also strips buffered bodies), add
-redact keys (re-redacts the buffer, drops buffered http events), lower
-production sampling, or kill capture (stops recording, deletes queued and
-saved capsules). Best effort: secrets in URL path segments, personal data that
-is not a credential, and binary bodies are not detected automatically.
-
-## Backend connectivity
-
-The token (or explicit backend) gives the API URL and credential:
-`GET {api}/v1/sdk/config`, `POST {api}/v1/capsules` (gzip body,
-`application/octet-stream`) and `POST {api}/v1/envelope`, each with
-`Authorization: Bearer <credential>`, over `HttpURLConnection` on the SDK's
-background thread (the SDK's own traffic is never captured). Uploads only
-after a successful config fetch (or a cached one younger than 7 days); outbox
-10 capsules / 10 MiB / 7 days, oldest evicted first; retry 30 s → 1 h with ±20 %
-jitter and `Retry-After`; 401/408/429/5xx/network retry, other 4xx drop;
-`capture_disabled` triggers a config refresh. Remote config is cached per
-(backend URL, ingest key), refreshed after its TTL (min 30 s), with 30 s → 30
-min backoff and on foreground. 401/403 stops capture for the session (queue
-kept) and is logged once with the backend's reason and advice; a 401 on an
-upload refreshes the configuration first. Network failures, timeouts and 5xx
-never reach the app: status `offline`, data stays queued. Production sessions record with probability
-`min(productionSampleRate (0.1), remote sampleRate)`. Storage never crashes the
-app: atomic writes, temp files cleaned at start, corrupt files dropped,
-disk-full drops the capsule. From an emulator the host is `10.0.2.2`; allow
-cleartext only for local hosts (see the demo's `network_security_config.xml`).
-
-## CLI configuration (`bugcapsule.json`)
+Add a `bugcapsule.json` at the project root:
 
 ```json
 {
   "runtime": "android",
   "android": {
-    "gradleDir": ".",               // Gradle root, relative to this file
-    "module": "app",                // Gradle module path
-    "moduleDir": "app",             // optional: module directory for APK lookup
+    "module": "app",
     "variant": "debug",
-    "applicationId": "com.example.shop",           // required
-    "testApplicationId": "com.example.shop.test",  // default <applicationId>.test
-    "runner": "dev.bugcapsule.android.replay.BugCapsuleReplayRunner",
-    "testClass": "dev.bugcapsule.android.replay.BugCapsuleReplayTest",
-    "avd": "Pixel_6_2",             // booted headless (-no-window -no-audio) when no device runs
-    "gradleArgs": [],               // extra Gradle arguments
-    "emulatorArgs": [],
-    "sdkDir": "/path/to/android/sdk",  // default ANDROID_HOME, local.properties, ~/Library/Android/sdk
-    "bootTimeoutSeconds": 300
-  },
-  "timeouts": {"buildSeconds": 1200, "attemptSeconds": 120}
+    "applicationId": "com.example.shop",
+    "avd": "Pixel_6_2"
+  }
 }
 ```
 
-The CLI builds `:<module>:assemble<Variant>` and `assemble<Variant>AndroidTest`
-with `-PbugcapsuleGitSha=<sha> -PbugcapsuleGitDirty=<bool>` (from the git
-checkout), or uses `--apk`/`--test-apk`. `BUGCAPSULE_ANDROID_GRADLE_ARGS`
-appends Gradle arguments for a single run. `--device` picks a running device
-(serial, AVD name or model) or an AVD to boot; an emulator the CLI booted is
-shut down afterwards. The device must be unlocked once after boot (AVDs with a
-screen-lock PIN cannot be unlocked by the CLI).
+Only `applicationId` is required. All keys:
+[docs/how-it-works.md](docs/how-it-works.md#bugcapsulejson).
 
-## Demo (`examples/demo`)
+### Run it
 
-A Views + Compose shop (Retrofit on OkHttp, an in-process `FakeShopServer`
-interceptor below the SDK hook with random latency/data, Jetpack Navigation,
-allowlisted SharedPreferences and DataStore, `CartViewModel` registered as
-state). Three planted bugs, all captured automatically:
-
-1. **Data-dependent** — 1 in 4 carts contain an item with `price: null`;
-   Checkout throws `IllegalStateException("Item legacy-pin has no price")`,
-   caught and sent with `BugCapsule.reportError`. Also: coupon `SAVE100` on a
-   cart under 100 fires `BugCapsule.check("cart_total_non_negative")`.
-2. **Timing-sensitive network** — "Refresh home" loads profile and
-   recommendations in parallel; when recommendations arrive first (~1 in 4) the
-   app crashes (`IllegalStateException: Recommendations arrived before the profile`).
-3. **State-restoration-dependent** — "Simulate upgrade from v0.9" writes a
-   legacy cart cache (a JSON array) to `shop_prefs`; after a restart, opening
-   the cart crashes with `JSONException`. Replay reproduces it only because the
-   launch checkpoint restores `shop_prefs`.
-
-Monitoring is on in the demo: every screen is traced, errors from the planted
-bugs arrive as events linked to their capsules, and shaking the device opens
-the feedback dialog (`bugcapsule-ndk` is included for native crash events).
-
-Build: `./gradlew :demo:assembleDebug` (export `BUGCAPSULE_SDK_TOKEN=bcsdk.v1.…`
-to enable uploads; self-hosted / advanced: `BUGCAPSULE_INGEST_KEY=bct_…` with
-`-PbugcapsuleBackendUrl=`, default `http://10.0.2.2:8787`).
-The demo's `bugcapsule.json` points the CLI at this Gradle build
-(`gradleDir: "../.."`, module `demo`).
-
-### Fix toggle (isolated, build-time)
-
-`-PbugcapsuleDemoFix=race` (or `BUGCAPSULE_DEMO_FIX=race`; comma-separated
-`race,price,legacy`) becomes `BuildConfig.DEMO_FIX`. No tracked source changes:
-
-```
-BUGCAPSULE_ANDROID_GRADLE_ARGS=-PbugcapsuleDemoFix=race bugcapsule verify <id> -p examples/demo   # applied
-bugcapsule verify <id> -p examples/demo                                                        # reverted
+```bash
+bugcapsule list                      # capsules in your project
+bugcapsule inspect <id>              # failure, eligibility, network, timeline
+bugcapsule run <id> -n 3             # builds the capsule's commit and replays it on the emulator
+bugcapsule verify <id> -n 3          # builds your working tree; FIXED when the bug is gone
+bugcapsule regress add <id>          # keep it as a regression test
+bugcapsule regress run               # in CI: exit 1 when a regression fails
 ```
 
-Only `race` keeps the recorded request sequence; `price`/`legacy` change which
-requests the app makes, so verifying those capsules is (correctly)
-inconclusive with `network.unrecorded`.
+The CLI builds the app and its androidTest APK, clears the app's data before
+each attempt and drives it through an instrumentation test. If no device is
+running it boots the `avd` headless. Unlock the device once after boot.
 
-## Tests
+**Replay is off in production.** It can only be started from the
+instrumentation runner, which ships in the androidTest APK only, and only for
+a debuggable build. There is no intent, deep link, URL or push into replay.
 
+See the [CLI reference](https://docs.bugcapsule.com/cli.html) and
+[how verdicts work](https://docs.bugcapsule.com/verdicts.html).
+
+## Monitoring
+
+Monitoring runs in every session, whether or not it records a capsule:
+
+| Signal | What you get |
+|---|---|
+| Errors | Uncaught exceptions, `reportError` / `check` / `fail`, `captureException` / `captureMessage`, **ANRs** (main thread blocked 5 s), **native crashes** with `bugcapsule-ndk` |
+| Release health | One session per foreground run; `crashed` and `abnormal` (killed in the foreground) sessions |
+| Performance | Activity and Fragment loads (TTID / TTFD), cold and warm start, Navigation and Compose screens, slow and frozen frames, OkHttp and SQLite spans |
+| User feedback | `captureFeedback`, a Views dialog, a Compose sheet, shake to report |
+
+When a capsule is written for an error, the error links to it, so each issue
+lists the capsules that replay it.
+
+```kotlin
+BugCapsuleConfig.builder()
+    .token(BuildConfig.BUGCAPSULE_TOKEN)
+    .tracesSampleRate(0.2)
+    .tracePropagationTargets("api.shop.com")       // none by default
+    .beforeSend { event, hint -> if (hint.throwable is CancellationException) null else event }
+    .enableShakeToReport(true)
+    .build()
+
+BugCapsule.setUser(User(id = "u_123"))
+BugCapsule.captureException(e)
+BugCapsuleFeedbackDialog.show(activity)
 ```
-./gradlew test                                   # every module, plus the Gradle plugin's tests
-./gradlew :demo:connectedDebugAndroidTest        # emulator; unset BUGCAPSULE_SDK_TOKEN / BUGCAPSULE_INGEST_KEY first
-bugcapsule-ndk/src/test/native/smoke.sh          # host smoke test of the signal handler (clang)
+
+`monitoring(false)` turns monitoring off; capsules keep working. All options
+and the full API: [docs/how-it-works.md](docs/how-it-works.md#monitoring).
+
+### Readable stack traces from minified builds
+
+The Gradle plugin embeds an id in every minified build and uploads its
+`mapping.txt`:
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+
+// app/build.gradle.kts
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.1" }
+
+bugcapsule {
+    url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
+    uploadProguardMapping.set(true)
+    failOnUploadError.set(true)
+}
 ```
 
-Monitoring is tested against a stubbed backend (MockWebServer speaking
-monitoring-v1): envelopes, capsule links, sessions, sampling, remote config,
-Retry-After, trace propagation, feedback.
+Set `BUGCAPSULE_SECRET_KEY` (a `bcs_…` key) in your CI secrets, never in the
+app. Without a URL or key the id is still embedded and the upload is skipped;
+`./gradlew uploadBugCapsuleProguardMapping<Variant>` uploads by hand. For NDK
+symbols, see [Release symbols](https://docs.bugcapsule.com/symbols.html).
 
-Token-only setup is tested the same way (`TokenSetupTest`: config fetch with
-the token's credential, explicit backend precedence, invalid / unsupported
-tokens, revoked token, hanging network, offline outbox), and the parser runs
-every shared vector in `spec-fixtures/connection-token-v1/vectors.json`
-(`ConnectionTokenTest`).
+## Privacy
 
-The vendored `spec-fixtures/` must equal `../bug_capsule_flutter_sdk/spec/fixtures`
-(`FixtureSyncTest`); re-sync with `bug_capsule_flutter_sdk/tool/sync_spec.sh`.
+Redaction runs on the device before anything is written: sensitive keys in
+bodies, storage, state and payloads; sensitive headers; credentials in URLs;
+and tokens, JWTs, API keys and card numbers in free text.
+
+Tighten it with `redactKeys`, `redactHeaders`, `redactPattern(...)`,
+`beforeRecord` / `beforeCheckpoint` and `BugCapsuleOkHttp(exclude = …)`.
+Storage is captured only when you allowlist it, and password input types are
+always redacted. Your project settings can also add redaction keys, turn off
+body capture, lower sampling or switch capture off remotely.
+
+Redaction is best effort. It does **not** find secrets in URL path segments,
+personal data that isn't a credential, or secrets in binary bodies. Inspect
+real capsules with `bugcapsule inspect` before a wider rollout. More:
+[Privacy and redaction](https://docs.bugcapsule.com/privacy.html).
+
+## Going to production
+
+- Production sessions record a sample of sessions: `productionSampleRate`
+  (default `0.1`), capped by your project's rate. Monitoring is not sampled.
+- Learn the kill switch before you need it: `bugcapsule capture --on` stops
+  capture for every device and deletes queued capsules; `--off` resumes it.
+- Upload the R8 mapping for every minified release.
+- Allow cleartext traffic only for local hosts.
+- Read the [production checklist](https://docs.bugcapsule.com/production.html).
+
+Data waits in a bounded outbox (10 capsules / 10 MiB / 7 days) and is retried
+with backoff. Storage and network errors never reach your app. Details:
+[docs/how-it-works.md](docs/how-it-works.md#storage-and-uploads).
 
 ## Limitations
 
-* Replay runs only through the instrumentation runner on an emulator/device
-  with a debuggable build; the replay screen should match the capture screen
-  for pointer replay (otherwise coordinates are scaled, `screen.size`).
-* Only the Back key is recorded among hardware keys; IME text arrives through
-  tracked fields only. Multi-window and system dialogs are not driven.
-* OkHttp replay answers in the interceptor: interceptors added after it,
+- Replay runs through the instrumentation runner on an emulator or device with
+  a debuggable build. Pointer replay works best on the same screen size
+  (otherwise coordinates are scaled).
+- Only the Back key is recorded among hardware keys; keyboard text arrives
+  through tracked fields only.
+- OkHttp replay answers inside the interceptor: interceptors added after it,
   network interceptors, caching and cookies are not exercised in replay.
-  Custom `RequestBody`s that are not one-shot must be re-writable.
-* Clock/random determinism only through `BugCapsule.currentTimeMillis()` and
-  `BugCapsule.random()`. WorkManager, alarms, Bluetooth, location, other
-  network stacks (HttpURLConnection, Ktor, Cronet) are not captured.
-* Monitoring: coroutines do not carry the current span (`startSpan` is per
-  thread; HTTP and database spans attach to the scope's transaction); the
-  ANR watchdog reports hangs while the process is alive (ANRs that kill the
-  app before 5 s are `abnormal` sessions); NDK frames are not symbolicated on
-  device and the NDK handler is not yet verified on devices (host smoke test
-  and builds only).
-* Navigation arguments that are Parcelables are not restored; state needs
-  registered serializers. Periodic checkpoints are used only when the session
-  outgrows the 5-minute / 20,000-event window.
+- Time and randomness are deterministic only through
+  `BugCapsule.currentTimeMillis()` and `BugCapsule.random()`. WorkManager,
+  alarms, Bluetooth, location and other network stacks (HttpURLConnection,
+  Ktor, Cronet) are not captured.
+- The NDK crash handler is not yet verified on physical devices.
 
-## Release procedure
+Full list: [docs/how-it-works.md#limitations](docs/how-it-works.md#limitations).
 
-1. Bump `VERSION_NAME` in `gradle.properties` (`SDK_VERSION` in BuildConfig follows).
-2. `./gradlew clean publishAll` writes AARs, sources jars and POMs to
-   `build/repo/dev/bugcapsule/<artifact>/<version>/` (a local Maven repository
-   for review). Point a consuming project at it with
-   `maven { url = uri("<path>/build/repo") }`.
-3. Run the unit tests, `:demo:connectedDebugAndroidTest`, and the CLI E2E
-   (`bugcapsule run/verify/regress`) on an emulator.
-4. Publishing to Maven Central (signing, staging) is intentionally not wired up.
+## Demo app
 
-## Release validation (2026-10-23)
+[`examples/demo`](examples/demo) is a Views + Compose shop with three planted
+"can't reproduce" bugs: bad server data, a network race and a stale cache
+after an upgrade. Build it with your SDK token:
 
-This repository is proprietary to Bug Capsule. Use, copying, modification, and distribution require prior written permission (see LICENSE). Local candidates are
-prepared without publishing. See `docs/release-readiness.md` for the current
-validation evidence and remaining release gates.
+```bash
+BUGCAPSULE_SDK_TOKEN=bcsdk.v1.… ./gradlew :demo:assembleDebug
+```
+
+Walkthrough and fix toggles: [docs/how-it-works.md](docs/how-it-works.md#demo-app).
+
+## More documentation
+
+| Topic | Where |
+|---|---|
+| Android SDK guide | [docs.bugcapsule.com/android](https://docs.bugcapsule.com/android.html) |
+| Quickstart (30 minutes, capture to verified fix) | [docs.bugcapsule.com/quickstart](https://docs.bugcapsule.com/quickstart.html) |
+| CLI reference | [docs.bugcapsule.com/cli](https://docs.bugcapsule.com/cli.html) |
+| How capture, monitoring, uploads and replay work | [docs/how-it-works.md](docs/how-it-works.md) |
+| Release symbols | [docs.bugcapsule.com/symbols](https://docs.bugcapsule.com/symbols.html) |
+| Troubleshooting | [docs.bugcapsule.com/troubleshooting](https://docs.bugcapsule.com/troubleshooting.html) |
+| Working on this repository | [docs/development.md](docs/development.md) |
+
+## Support and license
+
+Questions or access requests: [contact@bugcapsule.com](mailto:contact@bugcapsule.com).
+
+This SDK is proprietary software of Bug Capsule. Use, copying, modification
+and distribution require prior written permission. See [LICENSE](LICENSE).
