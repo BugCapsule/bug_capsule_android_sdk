@@ -63,24 +63,21 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.1")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.1")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.1")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.1")    // optional: SQLite / Room spans
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.1")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.2")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.2")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.2")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.2")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.2")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.2")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.2")
 }
 ```
 
 Make sure `mavenCentral()` is in your repositories. Java and Kotlin packages
 are `dev.bugcapsule.*`.
 
-> **Versions.** The latest release on Maven Central is `0.4.1-beta.1`. This
-> README describes `main`. **SDK tokens** (`token`) and **`BugCapsule.status()`**
-> ship in the next release. On `0.4.1-beta.1`, connect with an
-> [explicit address and ingest key](#connect-with-an-address-and-ingest-key)
-> instead.
+> **Versions.** SDK tokens and connection status are available starting with `0.4.1-beta.2`.
+> Existing explicit backend configuration remains supported.
 
 ## Connect your app
 
@@ -306,7 +303,7 @@ tool shipped in the Flutter package, so it needs
 Android projects.
 
 ```bash
-dart pub global activate bug_capsule 0.4.1-beta.1
+dart pub global activate bug_capsule 0.4.1-beta.2
 bugcapsule --version
 ```
 
@@ -403,7 +400,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.1" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.2" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
