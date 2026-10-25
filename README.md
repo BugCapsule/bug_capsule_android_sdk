@@ -63,13 +63,13 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.2")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.2")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.2")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.2")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.2")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.2")    // optional: SQLite / Room spans
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.2")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.3")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.3")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.3")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.3")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.3")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.3")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.3")
 }
 ```
 
@@ -400,7 +400,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.2" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.3" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL

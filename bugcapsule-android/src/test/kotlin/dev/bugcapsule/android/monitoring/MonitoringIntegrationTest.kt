@@ -387,6 +387,34 @@ class MonitoringIntegrationTest {
     }
 
     @Test
+    @org.robolectric.annotation.Config(sdk = [28])
+    fun activityFramesReachTheTransactionEnvelopeAfterWindowCreation() {
+        start { tracesSampleRate(1.0) }
+        val controller = Robolectric.buildActivity(Activity::class.java)
+        assertNull("regression: the window has no decor before activity creation", controller.get().window.peekDecorView())
+        controller.setup().visible()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        val window = controller.get().window
+        val now = System.nanoTime()
+        repeat(3) { i ->
+            val metrics = org.robolectric.shadows.FrameMetricsBuilder()
+                .setMetric(android.view.FrameMetrics.INTENDED_VSYNC_TIMESTAMP, now + i * 30_000_000L)
+                .setMetric(android.view.FrameMetrics.VSYNC_TIMESTAMP, now + i * 30_000_000L)
+                .setMetric(android.view.FrameMetrics.DRAW_DURATION, 20_000_000L)
+                .build()
+            shadowOf(window).reportOnFrameMetricsAvailable(metrics)
+        }
+        controller.pause()
+        flushAll()
+        val tx = items("transaction").single { it["op"] == "ui.load" }
+        assertNotNull("frame measurements must reach the uploaded transaction", tx["measurements"])
+        val measurements = J.obj(tx["measurements"])!!
+        assertEquals(3L, J.long(J.obj(measurements["frames_total"])!!["value"]))
+        assertTrue(measurements.keys.containsAll(listOf("frames_slow", "frames_frozen", "frames_delay")))
+        controller.stop().destroy()
+    }
+
+    @Test
     fun anUncaughtCrashIsPersistedSynchronouslyWithItsCapsuleAndCrashesTheSession() {
         start()
         val rt = runtime()

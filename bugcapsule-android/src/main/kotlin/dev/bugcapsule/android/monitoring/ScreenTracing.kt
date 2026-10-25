@@ -85,7 +85,6 @@ internal class ScreenTracer(
         val screen = Screen(tx, ttid, ttfd)
         screens[activity] = screen
         current = screen
-        trackFrames(activity.window, tx)
         onFirstFrame(activity) {
             val end = monitoring.nowMs()
             ttid.finishAt(end, SpanStatus.OK)
@@ -100,7 +99,13 @@ internal class ScreenTracer(
         trackFragments(activity)
     }
 
-    override fun onActivityStarted(activity: Activity) {}
+    override fun onActivityStarted(activity: Activity) = guard {
+        // onActivityCreated may run inside Activity.super.onCreate, before the
+        // app installs its content view. JankStats requires a live DecorView;
+        // started runs after onCreate has completed and before the first draw.
+        val screen = screens[activity] ?: return@guard
+        if (!screen.transaction.isFinished) trackFrames(activity.window, screen.transaction)
+    }
     override fun onActivityResumed(activity: Activity) = guard {
         monitoring.currentScope().setTag("screen", activity.javaClass.simpleName.ifEmpty { activity.javaClass.name })
     }
