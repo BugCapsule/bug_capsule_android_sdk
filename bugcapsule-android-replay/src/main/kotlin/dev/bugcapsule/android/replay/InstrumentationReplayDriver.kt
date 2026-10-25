@@ -25,6 +25,7 @@ class InstrumentationReplayDriver(private val instrumentation: Instrumentation) 
     @Volatile
     var scenario: ActivityScenario<out Activity>? = null
 
+    private var keyboardTransition = false
     private var downTime = 0L
     private val active = LinkedHashMap<Int, Pair<Float, Float>>()
     private var toolType = MotionEvent.TOOL_TYPE_FINGER
@@ -47,6 +48,7 @@ class InstrumentationReplayDriver(private val instrumentation: Instrumentation) 
     private fun round2(v: Double) = Math.round(v * 100) / 100.0
 
     override fun preparePointer(imeVisible: Boolean) {
+        keyboardTransition = false
         val activeScenario = checkNotNull(scenario) { "No activity for keyboard synchronization" }
         var matched = false
         var requested = false
@@ -68,6 +70,7 @@ class InstrumentationReplayDriver(private val instrumentation: Instrumentation) 
                 }
             }
             if (matched) {
+                keyboardTransition = requested
                 instrumentation.waitForIdleSync()
                 return
             }
@@ -129,14 +132,27 @@ class InstrumentationReplayDriver(private val instrumentation: Instrumentation) 
                 size = 1f
             }
         }
-        val event = MotionEvent.obtain(
-            downTime, SystemClock.uptimeMillis(), action, ids.size, properties, coords,
-            0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0,
-        )
-        try {
-            instrumentation.sendPointerSync(event)
-        } finally {
-            event.recycle()
+        val retryTransition = keyboardTransition && action == MotionEvent.ACTION_DOWN
+        keyboardTransition = false
+        injectWithKeyboardRetry(retryTransition, waitForTransition = {
+            // Older Android can report new insets before the IME input window stops
+            // intercepting touches. Retry only a rejected gesture start after our
+            // own keyboard change; keep normal instrumentation permission checks.
+            SystemClock.sleep(1_000)
+            var focused = false
+            scenario?.onActivity { focused = it.window.decorView.hasWindowFocus() }
+            downTime = SystemClock.uptimeMillis()
+            focused
+        }) {
+            val event = MotionEvent.obtain(
+                downTime, SystemClock.uptimeMillis(), action, ids.size, properties, coords,
+                0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0,
+            )
+            try {
+                instrumentation.sendPointerSync(event)
+            } finally {
+                event.recycle()
+            }
         }
     }
 
