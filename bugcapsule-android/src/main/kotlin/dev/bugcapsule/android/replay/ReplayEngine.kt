@@ -81,6 +81,13 @@ class ReplayEngine(
     private val createdNs = nanoTime()
     private var finalized = false
 
+    /**
+     * Interaction dependencies (capsule-v2 §5) on the replay clock
+     * [interactionClock]; due deliveries keep idle compression from skipping
+     * past their deadline.
+     */
+    override val interactions: InteractionReplay = InteractionReplay(capsule, ::interactionClock, ::diverge, ::activity)
+
     @Volatile
     private var startNs: Long? = null
 
@@ -107,6 +114,9 @@ class ReplayEngine(
 
     /** Replay clock in recorded ms since [run] started (skipped idle time included). */
     fun elapsed(): Long = (startNs?.let { msSince(it) } ?: 0) + skippedMs.get()
+
+    /** Clock of interaction deliveries: ms since the engine was created, skipped idle time included. */
+    fun interactionClock(): Long = msSince(createdNs) + skippedMs.get()
 
     /** Virtual wall clock: checkpoint wall time + time since restore + skipped idle time. */
     fun currentTimeMillis(): Long = capsule.checkpoint.wallClockMs + msSince(createdNs) + skippedMs.get()
@@ -200,6 +210,7 @@ class ReplayEngine(
     fun run(driver: ReplayDriver): ReplayReport {
         startNs = nanoTime()
         activity()
+        interactions.runStarted()
         val screen = try {
             driver.screen()
         } catch (_: Exception) {
@@ -221,7 +232,9 @@ class ReplayEngine(
             while (!isReproduced) {
                 val wait = due - elapsed()
                 if (wait <= 0) break
-                if (idleSince != null &&
+                // An interaction delivery due before the input keeps the gap from being skipped.
+                val deliveryDue = interactions.dueIn()?.let { it < wait } ?: false
+                if (idleSince != null && !deliveryDue &&
                     idle.maySkip(now = elapsed() + base, idleSince = idleSince, busy = busy, quietMs = quietMs)
                 ) {
                     skippedMs.addAndGet(wait)
@@ -285,6 +298,11 @@ class ReplayEngine(
             } catch (_: Exception) {
             }
             for (key in fixtures.unusedKeys()) diverge("network.unused", key)
+            try {
+                interactions.finish(capsule.manifest.failure?.t)
+            } catch (e: Exception) {
+                diverge("dispatch.error", "interactions: $e")
+            }
         }
         val expected = capsule.manifest.failure
         val seen = observed.get()

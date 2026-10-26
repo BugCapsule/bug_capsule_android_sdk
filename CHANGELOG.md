@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Read capsule format v2 (interaction dependencies) as well as v1; write v2 only when a capsule has WebSocket or adapter traffic. Readers reject versions newer than 2.
+- Add OkHttp WebSocket capture and offline replay (`BugCapsuleWebSockets`, adapter `bugcapsule-okhttp.websocket`).
+- Add the native SDK adapter API (`NativeAdapter`, `NativeInteractions`) and `NativeAdapterConformance` in `bugcapsule-android-replay` to test adapters in unit tests.
+- Replay ends `incompatible` (`dependency.unsupported`) when a required adapter is missing; interaction divergences (`ws.*`, `native.*`, `dependency.live`) keep `verify` from reporting a fix.
+- The project's capture settings can turn off a single adapter without affecting HTTP capture.
+- Replay fails every WebSocket and native adapter operation without a recording, including when the capsule has no recording for that adapter and for diagnostic adapters; it never falls back to the real dependency.
+- Native operation keys are scoped by SDK instance (`<operation>@<instance>`) when the wrapper names one.
+
 ## 0.4.1-beta.4 — 2026-10-25
 
 - Record soft-keyboard visibility with pointer input and restore it before injection. This prevents touches hitting the IME window on older Android versions; synchronization failures remain replay divergences.

@@ -24,6 +24,9 @@ import dev.bugcapsule.android.core.EligibilityBuilder
 import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.core.FlightRecorder
+import dev.bugcapsule.android.core.DependencyGaps
+import dev.bugcapsule.android.core.InteractionRecorder
+import dev.bugcapsule.android.core.InteractionTypes
 import dev.bugcapsule.android.core.Ids
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
@@ -49,6 +52,7 @@ import dev.bugcapsule.android.monitoring.ElfBuildId
 import dev.bugcapsule.android.feedback.BugCapsuleFeedbackDialog
 import dev.bugcapsule.android.feedback.ShakeDetector
 import dev.bugcapsule.android.replay.BugCapsuleReplay
+import dev.bugcapsule.android.replay.InteractionReplay
 import dev.bugcapsule.android.replay.ReplayEngine
 import dev.bugcapsule.android.storage.EarlyRestore
 import dev.bugcapsule.android.storage.StorageValues
@@ -196,6 +200,17 @@ internal class Runtime(
     override val applicationContext: Context get() = host.context
     override val replay: ReplayContext? get() = engine
 
+    /** Capture of interaction dependencies (capsule-v2), shared by every adapter of the session. */
+    private val interactionRecorder = InteractionRecorder(
+        sink = { type, data -> record(type, data) },
+        now = { now() },
+        redactor = { currentRedactor },
+        recording = { recording && !killed },
+        payloadsEnabled = { captureBodies },
+        disabledAdapters = { remote?.current?.disabledAdapters ?: emptyList() },
+    )
+    override val interactions: InteractionRecorder? get() = if (engine == null) interactionRecorder else null
+
     override fun now(): Long = host.elapsedRealtime() - startElapsed
 
     fun currentTimeMillis(): Long = engine?.currentTimeMillis() ?: System.currentTimeMillis()
@@ -278,6 +293,12 @@ internal class Runtime(
                     if (redacted["requestEncoding"] == "base64") redacted["requestBody"] = data["requestBody"]
                 }
                 if (type == EventTypes.FAILURE && data["signature"] is String) redacted["signature"] = data["signature"]
+                if (InteractionTypes.isInteraction(type)) {
+                    // Match keys hash redacted values and payloads were redacted by the
+                    // adapter's encoder; scrubbing them again would change keys and modes.
+                    if (data["key"] is String) redacted["key"] = data["key"]
+                    for (field in InteractionTypes.PAYLOAD_FIELDS) if (data.containsKey(field)) redacted[field] = data[field]
+                }
                 out = redacted
             }
             val before = config.beforeRecord
@@ -728,6 +749,13 @@ internal class Runtime(
             config.beforeCheckpoint?.let { clean = it.apply(STATE_KEY, clean) }
             if (clean != null) data[STATE_KEY] = clean
         }
+        if (kind == CheckpointKind.PERIODIC) {
+            try {
+                interactionRecorder.checkpoint()?.let { data[INTERACTIONS_KEY] = it }
+            } catch (e: Throwable) {
+                SdkLog.w("interaction checkpoint failed: $e")
+            }
+        }
         return data
     }
 
@@ -852,6 +880,30 @@ internal class Runtime(
                 eligibility.missing("integration.${integration.name}", "eligibility check failed: $e")
             }
         }
+        val dependencies = try {
+            interactionRecorder.dependencies(window.events)
+        } catch (e: Throwable) {
+            SdkLog.w("interaction dependencies failed: $e")
+            emptyList()
+        }
+        for (d in dependencies) {
+            if (d.gaps.isEmpty()) continue
+            eligibility.missing(
+                "dependency.${d.id}",
+                "${d.adapter} coverage is partial: " + d.gaps.joinToString(", ") { g -> g.code + (g.count?.let { "×$it" } ?: "") },
+            )
+        }
+        if (window.checkpoint.kind == CheckpointKind.PERIODIC) {
+            val open = J.list(J.obj(window.checkpoint.data[INTERACTIONS_KEY])?.get("open")) ?: emptyList()
+            val blocked = open.mapNotNull { J.obj(it) }.filter { it["restorable"] != true }
+            if (blocked.isNotEmpty()) {
+                eligibility.missing(
+                    "interactions.restore",
+                    "${blocked.size} connection(s)/subscription(s) were open at the periodic checkpoint and cannot be restored",
+                    blocking = true,
+                )
+            }
+        }
         if (states.isNotEmpty() && window.checkpoint.kind == CheckpointKind.PERIODIC) {
             val stateData = J.obj(window.checkpoint.data[STATE_KEY]) ?: emptyMap()
             for ((k, v) in stateData) {
@@ -907,6 +959,7 @@ internal class Runtime(
                 runtime = RuntimeInfo("android", host.apiLevel().toString(), "kotlin", frameworks.toList()),
                 capabilities = capabilities,
                 monitoring = monitoringLink ?: failure?.let { monitoringLink(failureEvents[it.signature], monitoring) },
+                dependencies = dependencies,
             ),
             checkpoint = window.checkpoint.shift(anchor),
             events = events,
@@ -1027,9 +1080,18 @@ internal class Runtime(
         val bodies = config.captureNetworkBodies && next.captureNetworkBodies
         if (captureBodies && !bodies) {
             synchronized(lock) {
-                recorder?.rewrite(event = { e -> if (e.type == EventTypes.HTTP) e.copy(data = withoutBodies(e.data)) else e })
+                recorder?.rewrite(
+                    event = { e ->
+                        when {
+                            e.type == EventTypes.HTTP -> e.copy(data = withoutBodies(e.data))
+                            InteractionTypes.isInteraction(e.type) -> e.copy(data = withoutPayloads(e.data))
+                            else -> e
+                        }
+                    },
+                )
             }
         }
+        dropDisabledAdapters(previous, next)
         captureBodies = bodies
         if (currentRedactor.extraKeys != (config.redactKeys + next.redactKeys).distinct()) {
             currentRedactor = baseRedactor(next.redactKeys)
@@ -1039,6 +1101,9 @@ internal class Runtime(
                         // Request keys were computed with the old rules; replay could not match them.
                         event = { e ->
                             if (e.type == EventTypes.HTTP) {
+                                null
+                            } else if (InteractionTypes.isInteraction(e.type)) {
+                                droppedInteraction(e)
                                 null
                             } else {
                                 sanitizeEvent(e.type, e.data, hook = false)?.let { CapsuleEvent(e.seq, e.t, e.type, it) }
@@ -1054,6 +1119,46 @@ internal class Runtime(
                 SdkLog.w("could not apply new redaction rules to the buffer ($e); dropping it")
                 stopRecording()
             }
+        }
+    }
+
+    /** Payload objects of an interaction event once payload capture is off: `omitted`, size and kind kept. */
+    private fun withoutPayloads(data: Map<String, Any?>): Map<String, Any?> {
+        val d = LinkedHashMap(data)
+        for (field in InteractionTypes.PAYLOAD_FIELDS) {
+            val p = J.obj(d[field]) ?: continue
+            d[field] = linkedMapOf<String, Any?>("mode" to "omitted", "replayable" to false).also { out ->
+                p["kind"]?.let { out["kind"] = it }
+            }
+        }
+        return d
+    }
+
+    /** Interaction events cannot be partially kept: their dependency gets an `events.dropped` gap. */
+    private fun droppedInteraction(e: CapsuleEvent) {
+        val dep = e.data["dep"] as? String ?: return
+        interactionRecorder.recorders().firstOrNull { it.descriptor.id == dep }
+            ?.gap(DependencyGaps.EVENTS_DROPPED, "buffered events dropped (redaction rules or adapter disabled remotely)")
+    }
+
+    /** Remote `disabledAdapters` (capsule-v2 §7): newly disabled adapters lose their buffered events; HTTP is untouched. */
+    private fun dropDisabledAdapters(previous: RemoteCaptureConfig?, next: RemoteCaptureConfig) {
+        val newly = next.disabledAdapters.toSet() - (previous?.disabledAdapters ?: emptyList()).toSet()
+        if (newly.isEmpty()) return
+        val deps = interactionRecorder.recorders().filter { it.descriptor.adapter in newly }.map { it.descriptor.id }.toSet()
+        if (deps.isEmpty()) return
+        SdkLog.i("interaction adapters disabled by remote config: ${newly.joinToString()}")
+        synchronized(lock) {
+            recorder?.rewrite(
+                event = { e ->
+                    if (InteractionTypes.isInteraction(e.type) && e.data["dep"] in deps) {
+                        droppedInteraction(e)
+                        null
+                    } else {
+                        e
+                    }
+                },
+            )
         }
     }
 
@@ -1119,6 +1224,31 @@ internal class Runtime(
             BugCapsuleReplay.publishEngine(null)
             return
         }
+        val adapters = integrations.flatMap { i ->
+            try {
+                i.interactionAdapters()
+            } catch (_: Throwable) {
+                emptyList()
+            }
+        }
+        val unsupported = InteractionReplay.preflight(capsule, adapters)
+        if (unsupported != null) {
+            SdkLog.w("replay incompatible: $unsupported")
+            armed.reporter.report(
+                ReplayReport(
+                    outcome = ReplayOutcome.INCOMPATIBLE,
+                    attempt = settings.attempt,
+                    durationMs = 0,
+                    strategy = settings.strategy,
+                    expectedSignature = capsule.manifest.failure?.signature,
+                    message = unsupported,
+                    attemptId = settings.attemptId,
+                    runtime = "android",
+                ),
+            )
+            BugCapsuleReplay.publishEngine(null)
+            return
+        }
         val e = ReplayEngine(capsule, settings, actions, gitSha, armed.reporter)
         engine = e
         e.precheck()
@@ -1137,7 +1267,7 @@ internal class Runtime(
             }
         }
         for (name in capsule.checkpoint.data.keys) {
-            if (name !in names && name != STATE_KEY) e.diverge("restore.missingIntegration", name)
+            if (name !in names && name != STATE_KEY && name != INTERACTIONS_KEY) e.diverge("restore.missingIntegration", name)
         }
         for (integration in integrations) {
             if (integration.name in EarlyRestore.KEYS) continue // restored before Application.onCreate
@@ -1274,6 +1404,9 @@ internal class Runtime(
 
     companion object {
         const val STATE_KEY = "state"
+
+        /** capsule-v2 §6: `checkpoint.data.interactions` (open connections and subscriptions). */
+        const val INTERACTIONS_KEY = "interactions"
 
         val BASE_CAPABILITIES: Map<String, String> = linkedMapOf(
             "input.pointer.capture" to "supported",
