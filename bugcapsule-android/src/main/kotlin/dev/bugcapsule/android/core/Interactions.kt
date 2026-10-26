@@ -54,7 +54,7 @@ object DependencyKinds {
     const val NATIVE = "native"
 }
 
-/** Gap codes of capsule-v2 §7 (plus `operation.unsupported`, see [OPERATION_UNSUPPORTED]). */
+/** Gap codes of capsule-v2 §7. */
 object DependencyGaps {
     const val PAYLOAD_TRUNCATED = "payload.truncated"
     const val PAYLOAD_DROPPED = "payload.dropped"
@@ -66,10 +66,7 @@ object DependencyGaps {
     const val CAPTURE_FAILED = "adapter.captureFailed"
     const val EVENTS_DROPPED = "events.dropped"
 
-    /**
-     * Android adapter extension: the app used an operation the native adapter
-     * does not support, so it ran uncaptured (replay fails it as unrecorded).
-     */
+    /** The app used an operation the adapter does not record; it ran uncaptured (replay fails it as unrecorded). */
     const val OPERATION_UNSUPPORTED = "operation.unsupported"
 }
 

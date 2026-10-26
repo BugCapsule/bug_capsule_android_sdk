@@ -37,8 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * ```
  *
  * Replay never calls the SDK: recorded results and events are handed to the
- * app's callbacks at their recorded latency, operations without a recording
- * fail with [NativeError.UNRECORDED]. Run [NativeAdapterConformance]
+ * app's callbacks at their recorded latency, decoded (`ByteArray`, `Long`,
+ * `Double`, primitive arrays, maps, as [dev.bugcapsule.android.core.TypedValue.decode]
+ * returns them), never as raw typed JSON. Operations without a recording,
+ * including every operation when the capsule has no recording for this
+ * adapter or the adapter is diagnostic, fail with [NativeError.UNRECORDED]. Run [NativeAdapterConformance]
  * (artifact `bugcapsule-android-replay`) against your adapter in a unit test.
  */
 interface NativeAdapter {
@@ -63,7 +66,11 @@ interface NativeAdapter {
     /** SDK package -> version this adapter was qualified against (`tested`). */
     val tested: Map<String, String> get() = emptyMap()
 
-    /** False: diagnostic capture only; replay passes calls through to the SDK and never serves them. */
+    /**
+     * False: diagnostic capture only (`coverage: diagnostic`). Replay never
+     * serves it and never calls the SDK either: every operation fails with
+     * [NativeError.UNRECORDED] and a `native.unrecorded` divergence.
+     */
     val required: Boolean get() = true
 
     /** Keep binary values (default: metadata only, which replay cannot serve). */
@@ -163,6 +170,10 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
 
     @Volatile
     private var replay: InteractionReplay? = null
+
+    /** Set in replay even when the session has no interaction replay: then everything is unrecorded. */
+    @Volatile
+    private var replaying = false
     private var diverge: (String, String) -> Unit = { _, _ -> }
     private val openSubs = AtomicInteger()
     private val ownExecutor = lazy<ExecutorService> {
@@ -188,6 +199,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         redactor = { session.redactor }
         val r = session.replay
         if (r != null) {
+            replaying = true
             replay = r.interactions
             diverge = r::diverge
             return
@@ -209,7 +221,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
     }
 
     /** True in replay: wrappers must not touch the SDK (and never need to: `live` is not called). */
-    val isReplaying: Boolean get() = replay != null
+    val isReplaying: Boolean get() = replaying
 
     /** Records a gap of this dependency (capsule-v2 §7), e.g. a value the wrapper could not convert. */
     @JvmOverloads
@@ -219,12 +231,12 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
 
     /** Replay: the SDK was reached for real (escaped the adapter): `dependency.live`. */
     fun reportLive(detail: String) {
-        if (replay != null) diverge("dependency.live", "${adapter.id}: $detail")
+        if (replaying) diverge("dependency.live", "${adapter.id}: $detail")
     }
 
     /** Replay: the adapter was installed after the SDK was initialised: `dependency.late`. */
     fun reportLate(detail: String) {
-        if (replay != null) diverge("dependency.late", "${adapter.id}: $detail")
+        if (replaying) diverge("dependency.late", "${adapter.id}: $detail")
     }
 
     /** Releases the adapter and stops replay deliveries. */
@@ -252,11 +264,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         parent: String? = null,
         live: NativeCall,
     ) {
-        val r = replay
-        if (r != null) {
-            if (!adapter.required) return live.start(callback)
-            return replayCall(r, operation, args, callback)
-        }
+        if (replaying) return replayCall(replay, operation, args, instance, callback)
         val rec = recorder
         if (rec == null || !rec.isCapturing) return live.start(callback)
         if (operation !in adapter.operations) {
@@ -264,7 +272,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
             return live.start(callback)
         }
         val op = rec.nextId("o")
-        val key = key(operation, args)
+        val key = key(operation, args, instance)
         rec.record(
             InteractionTypes.NATIVE_CALL,
             linkedMapOf<String, Any?>("op" to op, "operation" to operation).also {
@@ -297,12 +305,12 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         }
     }
 
-    private fun replayCall(r: InteractionReplay, operation: String, args: Any?, callback: NativeCallback) {
-        val dep = r.dependencyFor(adapter.id)
-        val key = key(operation, args)
-        val recorded = dep?.let { r.take(it.id, InteractionTypes.NATIVE_CALL, key) }
-        if (recorded == null) {
-            unrecorded(r, InteractionTypes.NATIVE_CALL, operation, key)
+    private fun replayCall(r: InteractionReplay?, operation: String, args: Any?, instance: String?, callback: NativeCallback) {
+        val dep = r?.let { dependency(it) }
+        val key = key(operation, args, instance)
+        val recorded = if (r != null && dep != null) r.take(dep.id, InteractionTypes.NATIVE_CALL, key) else null
+        if (r == null || recorded == null) {
+            unrecorded(r, InteractionTypes.NATIVE_CALL, operation, instance, key)
             deliver { callback.onError(NativeError(NativeError.UNRECORDED, "BugCapsule replay: no recorded $operation call")) }
             return
         }
@@ -341,11 +349,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         parent: String? = null,
         live: NativeSubscribe,
     ): NativeSubscription {
-        val r = replay
-        if (r != null) {
-            if (!adapter.required) return live.start(subscriber)
-            return replaySubscribe(r, operation, args, subscriber)
-        }
+        if (replaying) return replaySubscribe(replay, operation, args, instance, subscriber)
         val rec = recorder
         if (rec == null || !rec.isCapturing) return live.start(subscriber)
         if (operation !in adapter.operations) {
@@ -355,7 +359,7 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         val sub = rec.nextId("n")
         if (!rec.open("native.sub", sub)) return live.start(subscriber)
         openSubs.incrementAndGet()
-        val key = key(operation, args)
+        val key = key(operation, args, instance)
         rec.record(
             InteractionTypes.NATIVE_SUBSCRIBE,
             linkedMapOf<String, Any?>("sub" to sub, "operation" to operation).also {
@@ -414,12 +418,12 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         }
     }
 
-    private fun replaySubscribe(r: InteractionReplay, operation: String, args: Any?, subscriber: NativeSubscriber): NativeSubscription {
-        val dep = r.dependencyFor(adapter.id)
-        val key = key(operation, args)
-        val recorded = dep?.let { r.take(it.id, InteractionTypes.NATIVE_SUBSCRIBE, key) }
-        if (recorded == null) {
-            unrecorded(r, InteractionTypes.NATIVE_SUBSCRIBE, operation, key)
+    private fun replaySubscribe(r: InteractionReplay?, operation: String, args: Any?, instance: String?, subscriber: NativeSubscriber): NativeSubscription {
+        val dep = r?.let { dependency(it) }
+        val key = key(operation, args, instance)
+        val recorded = if (r != null && dep != null) r.take(dep.id, InteractionTypes.NATIVE_SUBSCRIBE, key) else null
+        if (r == null || recorded == null) {
+            unrecorded(r, InteractionTypes.NATIVE_SUBSCRIBE, operation, instance, key)
             deliver { subscriber.onError(NativeError(NativeError.UNRECORDED, "BugCapsule replay: no recorded $operation subscription")) }
             return NativeSubscription {}
         }
@@ -455,8 +459,23 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
 
     // -------------------------------------------------------------- shared
 
-    /** `<operation>||<hash of redacted arguments without nondeterministic fields>`, identical in capture and replay. */
-    fun key(operation: String, args: Any?): String {
+    /**
+     * The required dependency this adapter replays: its [NativeAdapter.dependencyId]
+     * when the capsule has it, else the first with this adapter id. Diagnostic
+     * dependencies are never replayed.
+     */
+    private fun dependency(r: InteractionReplay) =
+        r.dependencies.firstOrNull { it.id == adapter.dependencyId && it.adapter == adapter.id } ?: r.dependencyFor(adapter.id)
+
+    /** Match scope of an operation (capsule-v2 §5): `<operation>@<instance>` when an adapter instance is named. */
+    fun scope(operation: String, instance: String? = null): String = if (instance == null) operation else "$operation@$instance"
+
+    /**
+     * `<scope>||<hash of redacted arguments without nondeterministic fields>`
+     * with [scope], identical in capture and replay.
+     */
+    @JvmOverloads
+    fun key(operation: String, args: Any?, instance: String? = null): String {
         val ignored = adapter.nondeterministicFields(operation)
         val input = if (ignored.isNotEmpty() && args is Map<*, *>) args.filterKeys { it !in ignored } else args
         val json = try {
@@ -464,15 +483,20 @@ class NativeInteractions(val adapter: NativeAdapter) : BugCapsuleIntegration {
         } catch (_: Exception) {
             input?.javaClass?.name ?: "null"
         }
-        return interactionKey(operation, null, json)
+        return interactionKey(scope(operation, instance), null, json)
     }
 
-    private fun unrecorded(r: InteractionReplay, type: String, operation: String, key: String) {
-        val dep = r.dependencyFor(adapter.id)
-        val mismatch = dep != null && r.hasUnconsumed(dep.id, type, "$operation|")
+    private fun unrecorded(r: InteractionReplay?, type: String, operation: String, instance: String?, key: String) {
+        val dep = r?.let { dependency(it) }
+        if (r == null || dep == null) {
+            diverge("native.unrecorded", "${adapter.id} $operation: the capsule has no recording for this adapter ($key)")
+            return
+        }
+        val scope = scope(operation, instance)
+        val mismatch = r.hasUnconsumed(dep.id, type, "$scope|")
         diverge(
             if (mismatch) "native.mismatch" else "native.unrecorded",
-            if (mismatch) "$operation: arguments differ from the recording ($key)" else "$operation: no recording ($key)",
+            if (mismatch) "$scope: arguments differ from the recording ($key)" else "$scope: no recording ($key)",
         )
     }
 

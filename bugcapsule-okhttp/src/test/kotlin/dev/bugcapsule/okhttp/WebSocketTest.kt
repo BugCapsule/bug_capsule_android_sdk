@@ -7,6 +7,7 @@ import dev.bugcapsule.android.core.DependencyCoverage
 import dev.bugcapsule.android.core.DependencyGaps
 import dev.bugcapsule.android.core.InteractionPayload
 import dev.bugcapsule.android.core.PayloadMode
+import dev.bugcapsule.android.core.Redactor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -188,7 +189,16 @@ class WebSocketTest {
             s.recorder.recorders().single().record("ws.connect", mapOf("conn" to "ws1", "url" to "ws://other/", "key" to "ws://other/", "occurrence" to 0, "attempt" to 0))
             s.capsule()
         }
-        for (capsule in listOf(wsDep, FakeReplay.of(emptyList()).capsule)) {
+        // A diagnostic-only recording of the same connection is never served either.
+        val diagnostic = wsDep.copy(
+            manifest = wsDep.manifest.copy(
+                dependencies = wsDep.manifest.dependencies.map { it.copy(required = false, coverage = DependencyCoverage.DIAGNOSTIC) },
+            ),
+        )
+        val diagnosticKey = BugCapsuleWebSockets().key(request().url, Redactor())
+        val diagnosticCapsule = diagnostic.copy(events = diagnostic.events.map { it.copy(data = it.data + ("key" to diagnosticKey)) })
+        // Recorded, but no ws dependency / no capsule recording at all / diagnostic only: always unrecorded.
+        for (capsule in listOf(wsDep, FakeReplay.of(emptyList()).capsule, diagnosticCapsule)) {
             val (_, replay, ws) = replayOf(capsule)
             val listener = AppListener("a", ArrayList())
             val socket = ws.newWebSocket(client, request(), listener)

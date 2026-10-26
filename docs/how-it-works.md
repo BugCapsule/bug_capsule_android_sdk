@@ -286,12 +286,21 @@ time in recorded order across all sockets (never on the main thread).
 **Native adapters** implement `NativeAdapter` and go through
 `NativeInteractions.call` (`native.call` / `result` / `error`) and
 `subscribe` (`native.subscribe` / `event` / `error` / `done` / `cancel`).
-Operations match by operation name plus a hash of the redacted arguments
-(fields the adapter marks nondeterministic are left out) and invocation
-order. Replayed callbacks run on `NativeAdapter.callbackExecutor`, by default
-one background thread per adapter. Operations not in
-`NativeAdapter.operations` run uncaptured with an `operation.unsupported`
-gap. `NativeAdapterConformance` (`bugcapsule-android-replay`) checks an
+Operations match by scope (the operation name, or `<operation>@<instance>`
+when the wrapper names an SDK instance) plus a hash of the redacted
+arguments (fields the adapter marks nondeterministic are left out) and
+invocation order. Replayed callbacks run on `NativeAdapter.callbackExecutor`,
+by default one background thread per adapter, and receive decoded values
+(`ByteArray`, `Long`, primitive arrays, maps), the same values capture
+handed over. Operations not in `NativeAdapter.operations` run uncaptured
+with an `operation.unsupported` gap.
+
+Replay never reaches the real dependency. An operation with no recording
+fails, also when the capsule has no recording for the adapter at all and
+for diagnostic adapters (`required = false`, recorded for diagnosis only):
+WebSocket connects through `onFailure`, native calls and subscriptions with
+`NativeError.UNRECORDED`, each with a `ws.unrecorded` / `native.unrecorded`
+divergence. `NativeAdapterConformance` (`bugcapsule-android-replay`) checks an
 adapter end to end in a JVM unit test.
 
 **Replay checks.** Before the app starts, every required dependency needs

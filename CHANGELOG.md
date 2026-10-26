@@ -7,6 +7,8 @@
 - Add the native SDK adapter API (`NativeAdapter`, `NativeInteractions`) and `NativeAdapterConformance` in `bugcapsule-android-replay` to test adapters in unit tests.
 - Replay ends `incompatible` (`dependency.unsupported`) when a required adapter is missing; interaction divergences (`ws.*`, `native.*`, `dependency.live`) keep `verify` from reporting a fix.
 - The project's capture settings can turn off a single adapter without affecting HTTP capture.
+- Replay fails every WebSocket and native adapter operation without a recording, including when the capsule has no recording for that adapter and for diagnostic adapters; it never falls back to the real dependency.
+- Native operation keys are scoped by SDK instance (`<operation>@<instance>`) when the wrapper names one.
 
 ## 0.4.1-beta.4 — 2026-10-25
 

@@ -77,7 +77,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * and closes are compared with the recording in order (`ws.mismatch`) and
  * return the recorded result; recorded callbacks are delivered at their
  * recorded latency. A connect without a recording fails with
- * [ConnectException] through `onFailure` (`ws.unrecorded`).
+ * [ConnectException] through `onFailure` (`ws.unrecorded`), also when the
+ * capsule has no (or only a diagnostic) `bugcapsule-okhttp.websocket`
+ * dependency: replay never falls back to the network.
  *
  * **Listener threads in replay**: callbacks run on one background thread per
  * adapter (`BugCapsule-WebSocket`), never the main thread, one at a time in
@@ -336,7 +338,8 @@ class BugCapsuleWebSockets @JvmOverloads constructor(
         diverge: (String, String) -> Unit,
     ): WebSocket {
         val key = key(request.url, redactor)
-        val dep = replay?.dependencyFor(ADAPTER_ID)
+        // Diagnostic (required: false) dependencies are never served.
+        val dep = replay?.let { r -> r.dependencies.firstOrNull { it.id == dependencyId && it.adapter == ADAPTER_ID } ?: r.dependencyFor(ADAPTER_ID) }
         val recorded = if (replay != null && dep != null) replay.take(dep.id, InteractionTypes.WS_CONNECT, key) else null
         val executor: Executor = replay?.deliveryExecutor ?: replayExecutor.value
         val encoder = PayloadEncoder(
@@ -351,7 +354,14 @@ class BugCapsuleWebSockets @JvmOverloads constructor(
         if (replay == null || dep == null || recorded == null) {
             val path = key.substringBefore('?')
             val mismatch = replay != null && dep != null && replay.hasUnconsumed(dep.id, InteractionTypes.WS_CONNECT, path)
-            diverge(if (mismatch) "ws.mismatch" else "ws.unrecorded", if (mismatch) "connect $key: URL differs from the recording" else "connect $key")
+            diverge(
+                if (mismatch) "ws.mismatch" else "ws.unrecorded",
+                when {
+                    mismatch -> "connect $key: URL differs from the recording"
+                    dep == null -> "connect $key: the capsule has no WebSocket recording for $ADAPTER_ID"
+                    else -> "connect $key"
+                },
+            )
             socket.failUnrecorded(key)
         } else {
             socket.bind(recorded.data["conn"].toString())
