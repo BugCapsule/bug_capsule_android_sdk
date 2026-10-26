@@ -316,23 +316,6 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         }
     }
 
-    private fun applyPreviousScope(ev: MutableMap<String, Any?>, previous: Map<String, Any?>) {
-        Level.parse(J.str(previous["level"]))?.let { ev["level"] = it.wire }
-        J.list(previous["fingerprint"])?.let { list -> ev["fingerprint"] = Limits.fingerprint(list.mapNotNull { J.str(it) }) }
-        J.obj(previous["tags"])?.let { tags -> ev["tags"] = Limits.tags(tags.mapNotNull { (k, v) -> J.str(v)?.let { k to it } }.toMap()) }
-        J.obj(previous["user"])?.takeIf { it.isNotEmpty() }?.let { ev["user"] = it }
-        J.obj(previous["extra"])?.let { ev["extra"] = it }
-        J.list(previous["breadcrumbs"])?.let { ev["breadcrumbs"] = it.takeLast(100) }
-        J.obj(previous["contexts"])?.let { mirrored ->
-            // Device contexts are this launch's; `app` and the app's own contexts are the crashed process's.
-            val merged = LinkedHashMap(J.obj(ev["contexts"]) ?: emptyMap())
-            val trace = merged.remove("trace")
-            merged.putAll(mirrored)
-            if (trace != null) merged["trace"] = trace
-            ev["contexts"] = merged
-        }
-    }
-
     private fun user(u: User?): Map<String, Any?>? {
         val json = LinkedHashMap(u?.toJson() ?: emptyMap())
         if (config.sendDefaultPii && json["ipAddress"] == null) json["ipAddress"] = "{{auto}}"
@@ -787,6 +770,28 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
     }
 
     companion object {
+        /**
+         * Puts a crashed process's scope (as [scopeJson] wrote it) on [ev]:
+         * level, fingerprint, tags, user, extras, breadcrumbs, and its contexts
+         * over this launch's device contexts.
+         */
+        fun applyPreviousScope(ev: MutableMap<String, Any?>, previous: Map<String, Any?>) {
+            Level.parse(J.str(previous["level"]))?.let { ev["level"] = it.wire }
+            J.list(previous["fingerprint"])?.let { list -> ev["fingerprint"] = Limits.fingerprint(list.mapNotNull { J.str(it) }) }
+            J.obj(previous["tags"])?.let { tags -> ev["tags"] = Limits.tags(tags.mapNotNull { (k, v) -> J.str(v)?.let { k to it } }.toMap()) }
+            J.obj(previous["user"])?.takeIf { it.isNotEmpty() }?.let { ev["user"] = it }
+            J.obj(previous["extra"])?.let { ev["extra"] = it }
+            J.list(previous["breadcrumbs"])?.let { ev["breadcrumbs"] = it.takeLast(100) }
+            J.obj(previous["contexts"])?.let { mirrored ->
+                // Device contexts are this launch's; `app` and the app's own contexts are the crashed process's.
+                val merged = LinkedHashMap(J.obj(ev["contexts"]) ?: emptyMap())
+                val trace = merged.remove("trace")
+                merged.putAll(mirrored)
+                if (trace != null) merged["trace"] = trace
+                ev["contexts"] = merged
+            }
+        }
+
         const val SDK_NAME = "bugcapsule-android"
         const val FLUSH_DELAY_MS = 2_000L
         const val SCOPE_MIRROR_DELAY_MS = 100L

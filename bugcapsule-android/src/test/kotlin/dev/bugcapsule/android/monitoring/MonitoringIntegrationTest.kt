@@ -83,7 +83,7 @@ class MonitoringIntegrationTest {
 
     @After
     fun tearDown() {
-        dev.bugcapsule.android.internal.exitInfoOverride = null
+        PreviousProcess.exitInfoOverride = null
         BugCapsule.resetForTest()
         BugCapsule.testOverrides = null
         server.shutdown()
@@ -384,7 +384,7 @@ class MonitoringIntegrationTest {
             "{\"pid\":777,\"release\":\"com.shop@0.9.0+8\",\"environment\":\"production\",\"user\":{\"id\":\"u_anr\"},\"tags\":{\"screen\":\"cart\"}}",
         )
         val trace = ExitReasonsTest.ANR_TRACE.toByteArray()
-        dev.bugcapsule.android.internal.exitInfoOverride = ExitInfoSource {
+        PreviousProcess.exitInfoOverride = ExitInfoSource {
             listOf(
                 ExitRecord(777, ExitRecord.REASON_ANR, 1761000005000, 100, "Input dispatching timed out", app.packageName) { trace.inputStream() },
                 ExitRecord(776, ExitRecord.REASON_ANR, 1760000000000, 100, "already handled", app.packageName) { null },
@@ -416,7 +416,7 @@ class MonitoringIntegrationTest {
         java.io.File(tmp.root, "monitoring").mkdirs()
         java.io.File(tmp.root, "monitoring/exit_info.json").writeText("{\"lastTimestamp\":1761000000000}")
         val stone = ExitReasonsTest().tombstoneBytes()
-        dev.bugcapsule.android.internal.exitInfoOverride = ExitInfoSource {
+        PreviousProcess.exitInfoOverride = ExitInfoSource {
             listOf(ExitRecord(123, ExitRecord.REASON_CRASH_NATIVE, 1761000000600, 100, null, app.packageName) { stone.inputStream() })
         }
         start()
