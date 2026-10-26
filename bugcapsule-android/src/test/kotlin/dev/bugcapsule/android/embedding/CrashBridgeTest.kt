@@ -100,6 +100,20 @@ class CrashBridgeTest {
     }
 
     @Test
+    fun aTakeThatTimesOutNeverLosesEvents() {
+        assertTrue(CrashBridge.install(app, "a@1+1", "production", CrashBridge.Options(nativeCrashes = false, anr = false, exitInfo = false)))
+        val events = File(dir, "events").apply { mkdirs() }
+        repeat(20) { i ->
+            File(events, "${1000 + i}-e$i.json").writeText("{\"eventId\":\"e$i\"}")
+            val got = CrashBridge.takePendingEvents(timeoutMs = 0)
+            // Either handed out, or still on disk for the next take: never both gone.
+            val onDisk = File(events, "${1000 + i}-e$i.json").exists()
+            assertTrue("e$i lost", got.any { it.contains("e$i") } || onDisk)
+            if (onDisk) assertTrue(CrashBridge.takePendingEvents().any { it.contains("e$i") })
+        }
+    }
+
+    @Test
     fun installIsIdempotent() {
         assertTrue(CrashBridge.install(app, "a@1+1", "production", CrashBridge.Options(nativeCrashes = false, anr = false, exitInfo = false)))
         assertTrue(CrashBridge.install(app, "b@2+2", "qa"))

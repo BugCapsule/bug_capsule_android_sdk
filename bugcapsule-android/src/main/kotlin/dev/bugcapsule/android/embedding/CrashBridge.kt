@@ -195,19 +195,36 @@ object CrashBridge {
     @JvmOverloads
     fun takePendingEvents(timeoutMs: Long = 5_000): List<String> {
         val s = state ?: return emptyList()
-        return try {
-            s.executor.submit<List<String>> {
-                val files = (s.events.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: emptyArray()).sortedBy { it.name }
-                files.mapNotNull { f ->
-                    val text = try {
-                        f.readText()
-                    } catch (_: Exception) {
-                        null
-                    }
-                    Files.deleteQuietly(f)
-                    text
+        // A take that times out must not delete what its caller never got.
+        val lock = Any()
+        var cancelled = false
+        var handedOut = false
+        val task = s.executor.submit<List<String>> {
+            val files = (s.events.listFiles { f -> f.isFile && f.name.endsWith(".json") } ?: emptyArray()).sortedBy { it.name }
+            val texts = files.map { f ->
+                try {
+                    f.readText()
+                } catch (_: Exception) {
+                    null
                 }
-            }.get(timeoutMs, TimeUnit.MILLISECONDS)
+            }
+            synchronized(lock) {
+                if (cancelled) return@submit emptyList()
+                handedOut = true
+            }
+            files.forEach { Files.deleteQuietly(it) }
+            texts.filterNotNull()
+        }
+        return try {
+            task.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: java.util.concurrent.TimeoutException) {
+            synchronized(lock) {
+                if (!handedOut) {
+                    cancelled = true
+                    return emptyList()
+                }
+            }
+            task.get()
         } catch (e: Throwable) {
             SdkLog.w("CrashBridge could not read pending events: $e")
             emptyList()
