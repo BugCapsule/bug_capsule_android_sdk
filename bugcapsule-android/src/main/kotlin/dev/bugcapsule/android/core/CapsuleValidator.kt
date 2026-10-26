@@ -1,6 +1,6 @@
 package dev.bugcapsule.android.core
 
-/** Resource bounds of a v1 document (capsule-v1 *Validation*). */
+/** Resource bounds of a document (capsule-v1 *Validation*, capsule-v2 §9). */
 object CapsuleLimits {
     const val MAX_EVENTS = 200_000
     const val MAX_DEPTH = 100
@@ -10,15 +10,19 @@ object CapsuleLimits {
     const val MAX_REDACTION_KEYS = 500
     const val MAX_CAPABILITIES = 200
     const val MAX_FRAMEWORKS = 20
+    const val MAX_DEPENDENCIES = 100
+    const val MAX_DEPENDENCY_ITEMS = 100
+    const val MAX_TESTED = 20
 
     /** JSON values in the whole document, counted before parsing. */
     const val MAX_JSON_VALUES = 4_000_000
 }
 
 /**
- * Structural validation of a decoded capsule document, rule for rule the
- * Dart reference (`capsule_validator.dart`) and the backend. Returns null when
- * valid, otherwise `<json path> <reason>`.
+ * Structural validation of a decoded capsule document (spec v1 and v2), rule
+ * for rule the Dart reference (`capsule_validator.dart`) and the backend.
+ * Returns null when valid, otherwise `<json path> <reason>`. Does not check
+ * `specVersion` against the reader's version (the codec does that).
  */
 object CapsuleValidator {
     private class Invalid(message: String) : RuntimeException(message) {
@@ -128,7 +132,7 @@ object CapsuleValidator {
         val doc = obj(root, "$")
         depth(doc)
         if (doc["format"] != "bugcapsule.capsule") fail("$.format", "must be \"bugcapsule.capsule\"")
-        int(doc, "specVersion", "$", min = 1)
+        val specVersion = int(doc, "specVersion", "$", min = 1)
 
         val mp = "$.manifest"
         val m = obj(doc["manifest"], mp)
@@ -239,13 +243,17 @@ object CapsuleValidator {
             for (k in caps.keys) if (k.length > 100) fail("$mp.capabilities", "keys must be at most 100 characters")
         }
 
+        // capsule-v2 §2: required interaction dependencies.
+        val dependencies = if (specVersion >= 2) validateDependencies(m["dependencies"], "$mp.dependencies") else null
+
         val cp = "$.checkpoint"
         val checkpoint = obj(doc["checkpoint"], cp)
         enum(checkpoint, "kind", cp, listOf("launch", "periodic"))
         int(checkpoint, "t", cp)
         int(checkpoint, "wallClockMs", cp)
         optInt(checkpoint, "afterSeq", cp, min = 0)
-        optObj(checkpoint, "data", cp)
+        val checkpointData = optObj(checkpoint, "data", cp)
+        if (dependencies != null && checkpointData != null) validateOpenInteractions(checkpointData, "$cp.data")
 
         val events = array(doc["events"], "$.events", CapsuleLimits.MAX_EVENTS)
         var lastSeq: Long? = null
@@ -259,6 +267,127 @@ object CapsuleValidator {
             val type = string(e, "type", path, max = 100)
             val data = optObj(e, "data", path) ?: emptyMap()
             validateEventData(type, data, "$path.data")
+            if (dependencies != null) validateInteraction(type, data, "$path.data", dependencies)
+        }
+    }
+
+    private fun validateDependencies(value: Any?, path: String): Set<String> {
+        val list = array(value, path, CapsuleLimits.MAX_DEPENDENCIES)
+        val ids = HashSet<String>()
+        for (i in list.indices) {
+            val p = "$path[$i]"
+            val d = obj(list[i], p)
+            val id = string(d, "id", p, max = 100)
+            if (!ids.add(id)) fail("$p.id", "must be unique")
+            string(d, "kind", p, max = 50)
+            string(d, "adapter", p, max = 200)
+            string(d, "adapterVersion", p, max = 100)
+            int(d, "schema", p, min = 1)
+            if (d["required"] !is Boolean) fail("$p.required", "must be a boolean")
+            enum(d, "coverage", p, listOf("complete", "partial", "diagnostic"))
+            if (d["operations"] != null) {
+                val ops = array(d["operations"], "$p.operations", CapsuleLimits.MAX_DEPENDENCY_ITEMS)
+                for (j in ops.indices) {
+                    val v = ops[j]
+                    if (v !is String || v.isEmpty() || v.length > 200) fail("$p.operations[$j]", "must be a non-empty string")
+                }
+            }
+            if (d["tested"] != null) {
+                val tested = array(d["tested"], "$p.tested", CapsuleLimits.MAX_TESTED)
+                for (j in tested.indices) {
+                    val t = obj(tested[j], "$p.tested[$j]")
+                    string(t, "package", "$p.tested[$j]", max = 200)
+                    string(t, "version", "$p.tested[$j]", max = 100)
+                }
+            }
+            if (d["gaps"] != null) {
+                val gaps = array(d["gaps"], "$p.gaps", CapsuleLimits.MAX_DEPENDENCY_ITEMS)
+                for (j in gaps.indices) {
+                    val g = obj(gaps[j], "$p.gaps[$j]")
+                    string(g, "code", "$p.gaps[$j]", max = 100)
+                    optInt(g, "count", "$p.gaps[$j]", min = 0)
+                    optString(g, "detail", "$p.gaps[$j]", max = 2000)
+                }
+            }
+            optObj(d, "stats", p)?.let { stats ->
+                for (k in listOf("events", "payloadBytes", "dropped", "truncated")) optInt(stats, k, "$p.stats", min = 0)
+            }
+        }
+        return ids
+    }
+
+    private fun validateOpenInteractions(data: Map<String, Any?>, path: String) {
+        val interactions = optObj(data, "interactions", path) ?: return
+        if (interactions["open"] == null) return
+        val open = array(interactions["open"], "$path.interactions.open", CapsuleLimits.MAX_DEPENDENCY_ITEMS * 10)
+        for (i in open.indices) {
+            val p = "$path.interactions.open[$i]"
+            val o = obj(open[i], p)
+            string(o, "dep", p, max = 100)
+            string(o, "type", p, max = 50)
+            string(o, "id", p, max = 200)
+            optBool(o, "restorable", p)
+        }
+    }
+
+    private val PAYLOAD_MODES = listOf("full", "redacted", "metadata", "omitted", "truncated")
+
+    private fun payload(d: Map<String, Any?>, key: String, path: String) {
+        val v = d[key] ?: return
+        val p = obj(v, "$path.$key")
+        enum(p, "mode", "$path.$key", PAYLOAD_MODES)
+        if (p["replayable"] !is Boolean) fail("$path.$key.replayable", "must be a boolean")
+        optInt(p, "bytes", "$path.$key", min = 0)
+        optString(p, "kind", "$path.$key", max = 20)
+    }
+
+    /** capsule-v2 §9: fields replay reads from interaction events. */
+    private fun validateInteraction(type: String, d: Map<String, Any?>, path: String, dependencies: Set<String>) {
+        if (!InteractionTypes.isInteraction(type)) return
+        val dep = string(d, "dep", path, max = 100)
+        if (dep !in dependencies) fail("$path.dep", "must name a declared dependency")
+        for (field in listOf("payload", "args", "value", "details")) payload(d, field, path)
+        fun keyed() {
+            string(d, "key", path, max = 10000)
+            int(d, "occurrence", path, min = 0)
+        }
+        if (type.startsWith("ws.")) string(d, "conn", path, max = 200)
+        when (type) {
+            "ws.connect" -> keyed()
+            "ws.send", "ws.message" -> int(d, "index", path, min = 0)
+            "ws.close" -> {
+                enum(d, "initiator", path, listOf("client", "server", "unknown"))
+                optInt(d, "code", path)
+            }
+            "platform.call" -> {
+                string(d, "channel", path, max = 1000)
+                string(d, "call", path, max = 200)
+                enum(d, "dir", path, listOf("dart", "platform"))
+                keyed()
+            }
+            "platform.result", "platform.error" -> {
+                string(d, "channel", path, max = 1000)
+                string(d, "call", path, max = 200)
+            }
+            "platform.listen" -> {
+                string(d, "channel", path, max = 1000)
+                string(d, "sub", path, max = 200)
+                keyed()
+            }
+            "platform.event", "platform.cancel", "platform.done" -> {
+                string(d, "channel", path, max = 1000)
+                string(d, "sub", path, max = 200)
+            }
+            "native.call" -> {
+                string(d, "op", path, max = 200)
+                keyed()
+            }
+            "native.result" -> string(d, "op", path, max = 200)
+            "native.subscribe" -> {
+                string(d, "sub", path, max = 200)
+                keyed()
+            }
+            "native.event", "native.cancel", "native.done" -> string(d, "sub", path, max = 200)
         }
     }
 

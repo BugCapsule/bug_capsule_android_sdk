@@ -8,10 +8,16 @@ import java.util.zip.GZIPOutputStream
 
 class CapsuleFormatException(message: String) : Exception(message)
 
-/** Reads and writes `.bugcapsule` files (gzip-compressed UTF-8 JSON, spec v1). */
+/**
+ * Reads and writes `.bugcapsule` files (gzip-compressed UTF-8 JSON). Reads
+ * spec v1 and v2 and rejects newer versions; writes v2 only when the capsule
+ * has interaction dependencies (capsule-v2 §1), otherwise v1.
+ */
 object CapsuleCodec {
     const val FORMAT = "bugcapsule.capsule"
-    const val SPEC_VERSION = 1
+
+    /** The newest spec version this reader implements. */
+    const val SPEC_VERSION = 2
 
     /** Same bound as the Dart reader: what a hostile file can make us allocate. */
     const val MAX_DECOMPRESSED_BYTES = 200 * 1024 * 1024
@@ -19,7 +25,7 @@ object CapsuleCodec {
     @JvmStatic
     fun toJson(capsule: Capsule): Map<String, Any?> = linkedMapOf(
         "format" to FORMAT,
-        "specVersion" to SPEC_VERSION,
+        "specVersion" to capsule.specVersion,
         "manifest" to capsule.manifest.toJson(),
         "checkpoint" to capsule.checkpoint.toJson(),
         "events" to capsule.events.map { it.toJson() },
@@ -99,7 +105,7 @@ object CapsuleCodec {
         if (problem != null) throw CapsuleFormatException("malformed capsule: $problem")
         return try {
             Capsule(
-                manifest = CapsuleManifest.fromJson(J.obj(json["manifest"])!!),
+                manifest = CapsuleManifest.fromJson(J.obj(json["manifest"])!!, v.toInt()),
                 checkpoint = Checkpoint.fromJson(J.obj(json["checkpoint"])!!),
                 events = J.list(json["events"])!!.map { CapsuleEvent.fromJson(J.obj(it)!!) },
             )

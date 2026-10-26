@@ -6,10 +6,13 @@ import dev.bugcapsule.android.core.CaptureMode
 import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.EligibilityBuilder
 import dev.bugcapsule.android.core.FixtureStore
+import dev.bugcapsule.android.core.InteractionAdapterInfo
+import dev.bugcapsule.android.core.InteractionRecorder
 import dev.bugcapsule.android.core.RecordedWindow
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.core.ReplaySettings
 import dev.bugcapsule.android.monitoring.HttpSpanHandle
+import dev.bugcapsule.android.replay.InteractionReplay
 
 /** What the runtime exposes to integrations (OkHttp, Navigation, storage...). */
 interface BugCapsuleSession {
@@ -55,6 +58,13 @@ interface BugCapsuleSession {
      * monitoring is off: then no header may be added.
      */
     fun startHttpSpan(method: String, url: String): HttpSpanHandle? = null
+
+    /**
+     * Capture of interaction dependencies (capsule-v2: WebSockets, native SDK
+     * adapters): adapters register their dependency here. Null in replay and
+     * when capture is off.
+     */
+    val interactions: InteractionRecorder? get() = null
 }
 
 /** Replay services for integrations. */
@@ -80,6 +90,9 @@ interface ReplayContext {
 
     /** True once the first recorded input was dispatched (late restoration check). */
     val inputsStarted: Boolean
+
+    /** Recorded interaction dependencies (capsule-v2 §5): what WebSocket and native adapters serve. */
+    val interactions: InteractionReplay? get() = null
 }
 
 fun interface WorkToken {
@@ -116,6 +129,13 @@ interface BugCapsuleIntegration {
 
     /** Capability keys this integration adds to `manifest.capabilities`. */
     fun capabilities(): Map<String, String> = emptyMap()
+
+    /**
+     * Interaction adapters this integration installs (capsule-v2 §2
+     * *Preflight*): replay of a capsule whose required dependency has no
+     * installed adapter with a supported schema ends `incompatible`.
+     */
+    fun interactionAdapters(): List<InteractionAdapterInfo> = emptyList()
 }
 
 /** Body of [BugCapsule.startSpan]. */

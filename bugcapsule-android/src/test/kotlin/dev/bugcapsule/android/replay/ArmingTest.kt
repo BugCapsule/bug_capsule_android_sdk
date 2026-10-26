@@ -7,7 +7,16 @@ import android.content.pm.ApplicationInfo
 import androidx.test.core.app.ApplicationProvider
 import dev.bugcapsule.android.BugCapsule
 import dev.bugcapsule.android.BugCapsuleConfig
+import dev.bugcapsule.android.BugCapsuleIntegration
 import dev.bugcapsule.android.core.CapsuleCodec
+import dev.bugcapsule.android.core.CapsuleDependency
+import dev.bugcapsule.android.core.DependencyCoverage
+import dev.bugcapsule.android.core.DependencyKinds
+import dev.bugcapsule.android.core.InteractionAdapterInfo
+import dev.bugcapsule.android.core.ReplayOutcome
+import dev.bugcapsule.android.core.ReplayReport
+import dev.bugcapsule.android.core.RunKind
+import dev.bugcapsule.android.core.Verdicts
 import dev.bugcapsule.android.core.Checkpoint
 import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.Json
@@ -162,5 +171,44 @@ class ArmingTest {
         assertEquals(java.util.Random(42).nextInt(), BugCapsule.random().nextInt())
         val now = BugCapsule.currentTimeMillis()
         assertTrue(now in 1_760_000_000_000..1_760_000_010_000)
+    }
+
+    private fun wsCapsule() = CapsuleCodec.encode(
+        TestCapsules.capsule(emptyList()).let { c ->
+            c.copy(
+                manifest = c.manifest.copy(
+                    dependencies = listOf(
+                        CapsuleDependency("ws", DependencyKinds.WEBSOCKET, "bugcapsule-okhttp.websocket", "0.5.0", 1, true, DependencyCoverage.COMPLETE),
+                    ),
+                ),
+            )
+        },
+    )
+
+    @Test
+    fun aRequiredDependencyWithoutAnAdapterIsIncompatible() {
+        debuggable(true)
+        capsuleBytes = wsCapsule()
+        assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
+        BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        assertNull(BugCapsuleReplay.awaitEngine(1000))
+        val report = ReplayReport.fromJson(Json.parse(results.poll(5, TimeUnit.SECONDS)!!) as Map<String, Any?>)
+        assertEquals(ReplayOutcome.INCOMPATIBLE, report.outcome)
+        assertTrue(report.message!!, report.message!!.startsWith("dependency.unsupported: bugcapsule-okhttp.websocket schema 1"))
+        assertEquals(listOf("dependency.unsupported"), Verdicts.evaluate(RunKind.VERIFY, 1, listOf(report)).reasonCodes)
+    }
+
+    @Test
+    fun anInstalledAdapterPassesPreflight() {
+        debuggable(true)
+        capsuleBytes = wsCapsule()
+        assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
+        val adapter = object : BugCapsuleIntegration {
+            override val name = "okhttp.websocket"
+            override fun interactionAdapters() = listOf(InteractionAdapterInfo("bugcapsule-okhttp.websocket", 1..1))
+        }
+        BugCapsule.init(app, BugCapsuleConfig.builder().build(), listOf(adapter))
+        val engine = BugCapsuleReplay.awaitEngine(1000)!!
+        assertEquals("ws", engine.interactions.dependencyFor("bugcapsule-okhttp.websocket")!!.id)
     }
 }

@@ -43,12 +43,12 @@ Keep them on the same version.
 | Artifact | What it is |
 |---|---|
 | `bugcapsule-android` | The SDK: capture, upload, replay engine, monitoring, Views helpers, SharedPreferences / DataStore checkpoints, ViewModel state |
-| `bugcapsule-okhttp` | OkHttp (and Retrofit) capture and replay, HTTP spans and trace propagation |
+| `bugcapsule-okhttp` | OkHttp (and Retrofit) capture and replay, OkHttp WebSockets, HTTP spans and trace propagation |
 | `bugcapsule-navigation` | Jetpack Navigation routes, back-stack restore, navigation transactions |
 | `bugcapsule-compose` | Compose helpers: actions, tracked text, navigation, screen tracing, feedback sheet |
 | `bugcapsule-ndk` | Native (NDK) crash reporting (optional) |
 | `bugcapsule-sqlite` | SQLite / Room query spans (optional) |
-| `bugcapsule-android-replay` | **androidTest only**: the replay runner the CLI uses |
+| `bugcapsule-android-replay` | **Test only**: the replay runner the CLI uses (androidTest), and `NativeAdapterConformance` for your adapters' unit tests |
 | Gradle plugin `io.github.bugcapsule.gradle` | Uploads R8/ProGuard mappings so stack traces from minified builds are readable (optional) |
 
 ## Requirements
@@ -180,6 +180,8 @@ app's network, navigation and state. Add the adapters that match your app;
 | Adapter | Gives replay |
 |---|---|
 | `BugCapsuleOkHttp` (`bugcapsule-okhttp`) | Network: OkHttp and Retrofit |
+| `BugCapsuleWebSockets` (`bugcapsule-okhttp`) | OkHttp WebSockets opened through its factory |
+| `NativeInteractions` + your `NativeAdapter` | A third-party SDK (location, auth, database, payments) |
 | `BugCapsuleNavigation` (`bugcapsule-navigation`) | Routes and back-stack restore |
 | `BugCapsuleSharedPreferences`, `BugCapsuleDataStore`, `registerState`, `registerViewModel` | App state in checkpoints |
 | `bugcapsule-compose` helpers | Actions, tracked text, screens in Compose |
@@ -230,6 +232,53 @@ val client = OkHttpClient.Builder()
     .addInterceptor(ShopApp.okHttp.interceptor) // BugCapsule last: the innermost application interceptor
     .build()
 ```
+
+### WebSockets and native SDKs
+
+OkHttp WebSockets are captured when the app opens them through
+`BugCapsuleWebSockets`. Replay never connects: recorded messages, closes and
+failures reach your `WebSocketListener` at their recorded latency, and a
+connection that was not recorded fails through `onFailure`.
+
+```kotlin
+val webSockets = BugCapsuleWebSockets()        // add it to BugCapsule.init's integrations
+val sockets: WebSocket.Factory = webSockets.factory(client)
+val ws = sockets.newWebSocket(Request.Builder().url("wss://quotes.example.com/v1/stream").build(), listener)
+```
+
+Binary frames are recorded as size only unless you pass
+`BugCapsuleWebSockets(captureBinary = true)`; replay cannot serve them
+otherwise. In replay, listener callbacks run on one background thread
+(`BugCapsule-WebSocket`), in recorded order across all sockets.
+
+Other SDKs need an adapter: implement `NativeAdapter` (identity, operations,
+payload policy) and route the SDK's calls and subscriptions through
+`NativeInteractions.call` / `subscribe` in a small wrapper. Capture records
+them with the session's redaction and limits; replay answers from the
+capsule without calling the SDK.
+
+```kotlin
+val location = NativeInteractions(LocationAdapter())   // add it to BugCapsule.init's integrations
+val provider: LocationProvider = BugCapsuleLocationProvider(realProvider, location)
+
+// In the wrapper:
+bridge.call("location.last", null, callback) { cb -> real.lastLocation(cb) }
+bridge.subscribe("location.updates", mapOf("intervalMs" to 1000), subscriber) { s -> real.requestUpdates(s) }
+```
+
+Check your adapter in a plain unit test with `NativeAdapterConformance`
+(`testImplementation("io.github.bugcapsule:bugcapsule-android-replay:…")`): it
+records a scripted session, replays it offline and fails on any divergence,
+on SDK use during replay, and when an unsupported operation does not produce
+an explicit gap. A complete example adapter and its test:
+[`LocationAdapter.kt`](bugcapsule-android-replay/src/test/kotlin/dev/bugcapsule/android/replay/example/LocationAdapter.kt),
+[`LocationAdapterConformanceTest.kt`](bugcapsule-android-replay/src/test/kotlin/dev/bugcapsule/android/replay/example/LocationAdapterConformanceTest.kt).
+
+Capsules with WebSocket or adapter traffic use capsule format v2. Replaying
+one needs the same adapter installed; otherwise the attempt ends
+`incompatible` (`dependency.unsupported`). Your project's capture settings
+can turn off a single adapter (for example `bugcapsule-okhttp.websocket`)
+without affecting HTTP capture.
 
 ### Actions, text, assertions and state
 
@@ -284,6 +333,8 @@ BugCapsule.check("cart_total_non_negative", total >= 0, "total " + total);
 | Actions and text | Only through the helpers above |
 | Navigation | Jetpack Navigation destinations |
 | Network | OkHttp exchanges, with a bounded body prefix (256 KiB text, 64 KiB binary) |
+| WebSockets | OkHttp sockets opened through `BugCapsuleWebSockets`: connects, sends, messages, closes and failures (64 KiB per frame, binary as size only by default) |
+| Native SDKs | Calls and subscriptions of SDKs you route through a `NativeAdapter` |
 | Storage | Allowlisted SharedPreferences files/keys and DataStore stores |
 | Failures | `check` / `fail`, `reportError`, and uncaught JVM exceptions on any thread |
 
@@ -456,8 +507,13 @@ with backoff. Storage and network errors never reach your app. Details:
   network interceptors, caching and cookies are not exercised in replay.
 - Time and randomness are deterministic only through
   `BugCapsule.currentTimeMillis()` and `BugCapsule.random()`. WorkManager,
-  alarms, Bluetooth, location and other network stacks (HttpURLConnection,
-  Ktor, Cronet) are not captured.
+  alarms and Bluetooth are not captured. Other network stacks
+  (HttpURLConnection, Ktor, Cronet, WebSockets not opened through
+  `BugCapsuleWebSockets`) and SDKs such as location, maps or Firebase need an
+  adapter (`NativeAdapter`); without one they are not captured.
+- WebSocket and adapter replay cannot restore connections or subscriptions
+  that were open at a periodic checkpoint; such capsules are marked
+  ineligible and replay reports `incompatible`.
 - The NDK crash handler is not yet verified on physical devices.
 
 Full list: [docs/how-it-works.md#limitations](docs/how-it-works.md#limitations).

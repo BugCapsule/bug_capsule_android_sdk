@@ -288,6 +288,8 @@ data class CapsuleManifest(
     val capabilities: Map<String, String> = emptyMap(),
     /** monitoring-v1 §4.3: `{eventId, traceId?, release, environment}` of the event sent for this failure. */
     val monitoring: Map<String, Any?>? = null,
+    /** capsule-v2 §2: interaction dependencies; non-empty makes the capsule v2. */
+    val dependencies: List<CapsuleDependency> = emptyList(),
 ) {
     val runtimeName: String get() = runtime?.name ?: RuntimeInfo.infer(sdkName)
 
@@ -317,10 +319,13 @@ data class CapsuleManifest(
         if (runtime != null) it["runtime"] = runtime.toJson()
         if (capabilities.isNotEmpty()) it["capabilities"] = capabilities
         if (monitoring != null) it["monitoring"] = monitoring
+        if (dependencies.isNotEmpty()) it["dependencies"] = dependencies.map { d -> d.toJson() }
     }
 
     companion object {
-        fun fromJson(j: Map<String, Any?>): CapsuleManifest {
+        /** [specVersion] 1 ignores `dependencies` (capsule-v2 §1: it has no effect on a v1 capsule). */
+        @JvmOverloads
+        fun fromJson(j: Map<String, Any?>, specVersion: Int = 1): CapsuleManifest {
             val source = J.obj(j["source"]) ?: emptyMap()
             val sdk = J.obj(j["sdk"]) ?: emptyMap()
             val stats = J.obj(j["stats"]) ?: emptyMap()
@@ -349,6 +354,11 @@ data class CapsuleManifest(
                 runtime = J.obj(j["runtime"])?.let { RuntimeInfo.fromJson(it) },
                 capabilities = (J.obj(j["capabilities"]) ?: emptyMap()).mapValues { it.value as String },
                 monitoring = J.obj(j["monitoring"]),
+                dependencies = if (specVersion < 2) {
+                    emptyList()
+                } else {
+                    (J.list(j["dependencies"]) ?: emptyList()).map { CapsuleDependency.fromJson(J.obj(it)!!) }
+                },
             )
         }
     }
@@ -360,6 +370,12 @@ data class Capsule(
     val events: List<CapsuleEvent>,
 ) {
     fun eventsOfType(type: String) = events.filter { it.type == type }
+
+    /** 2 when the capsule has interaction dependencies (capsule-v2), else 1: v1 tooling keeps reading v1-only sessions. */
+    val specVersion: Int get() = if (manifest.dependencies.isEmpty()) 1 else 2
+
+    /** The dependency [id] names, or null. */
+    fun dependency(id: String): CapsuleDependency? = manifest.dependencies.firstOrNull { it.id == id }
 }
 
 /** ISO-8601 in UTC with milliseconds, like Dart's `toUtc().toIso8601String()`. */

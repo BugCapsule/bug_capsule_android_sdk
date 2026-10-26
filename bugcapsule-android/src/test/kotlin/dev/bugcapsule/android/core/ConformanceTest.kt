@@ -85,4 +85,38 @@ class ConformanceTest {
             )
         }
     }
+
+    @Test
+    fun verdicts() {
+        val doc = SpecFixtures.json("conformance/verdicts.json")
+        assertEquals(doc["expectedDivergences"], DivergencePolicy.EXPECTED.sorted())
+        val all = doc["cases"] as List<Map<String, Any?>>
+        assert(all.size >= 27)
+        for (c in all) {
+            val name = c["name"] as String
+            val reports = (c["reports"] as List<Map<String, Any?>>).map { r ->
+                ReplayReport(
+                    outcome = ReplayOutcome.parse(r["outcome"] as String),
+                    attempt = 1,
+                    durationMs = 100,
+                    strategy = ReplayStrategy.AUTO,
+                    expectedSignature = r["expectedSignature"] as String?,
+                    eventsDispatched = J.int(r["eventsDispatched"]) ?: 0,
+                    eventsExpected = J.int(r["eventsExpected"]),
+                    divergences = (r["divergences"] as List<String>? ?: emptyList()).map { Divergence(it, "x") },
+                    otherFailures = (r["otherFailures"] as List<String>? ?: emptyList()).map {
+                        FailureRecord(FailureKind.EXCEPTION, it, "E", "", 0)
+                    },
+                    message = r["message"] as String?,
+                )
+            }
+            val e = Verdicts.evaluate(if (c["kind"] == "replay") RunKind.REPLAY else RunKind.VERIFY, J.int(c["requested"])!!, reports)
+            assertEquals(name, c["verdict"], e.verdict.dartName)
+            assertEquals(name, c["wire"], e.verdict.wire)
+            assertEquals(name, J.int(c["exitCode"]), e.exitCode)
+            assertEquals(name, J.int(c["validAttempts"]), e.validAttempts)
+            assertEquals(name, c["attemptStatuses"], e.attempts.map { it.status.name.lowercase() })
+            assertEquals(name, c["reasonCodes"], e.reasonCodes)
+        }
+    }
 }

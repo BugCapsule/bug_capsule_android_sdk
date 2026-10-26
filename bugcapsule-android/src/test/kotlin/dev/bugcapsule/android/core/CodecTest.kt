@@ -21,8 +21,9 @@ class CodecTest {
 
     @Test
     fun everyValidFixtureDecodesAndReEncodesValid() {
-        val files = SpecFixtures.files("capsule-v1/valid")
-        assertTrue(files.size >= 7)
+        assertTrue(SpecFixtures.files("capsule-v1/valid").size >= 7)
+        assertTrue(SpecFixtures.files("capsule-v2/valid").size >= 5)
+        val files = SpecFixtures.files("capsule-v1/valid") + SpecFixtures.files("capsule-v2/valid")
         for (f in files) {
             val doc = (Json.parse(f.readText()) as Map<String, Any?>)["document"] as Map<String, Any?>
             val capsule = CapsuleCodec.decode(gz(Json.stringify(doc)))
@@ -33,7 +34,49 @@ class CodecTest {
             assertEquals(f.name, capsule.events.size, again.events.size)
             assertEquals(f.name, capsule.events, again.events)
             assertEquals(f.name, capsule.manifest.failure, again.manifest.failure)
+            assertEquals(f.name, capsule.manifest.dependencies, again.manifest.dependencies)
+            assertEquals(f.name, doc["specVersion"], CapsuleCodec.toJson(again)["specVersion"].let { (it as Int).toLong() })
         }
+    }
+
+    @Test
+    fun v2DependenciesAreRead() {
+        val doc = SpecFixtures.json("capsule-v2/valid/websocket.json")["document"] as Map<String, Any?>
+        val ws = CapsuleCodec.fromJson(doc).dependency("ws")!!
+        assertEquals("bug_capsule.web_socket_channel", ws.adapter)
+        assertEquals(1, ws.schema)
+        assertTrue(ws.required)
+        assertEquals(DependencyCoverage.COMPLETE, ws.coverage)
+        assertEquals(mapOf("web_socket_channel" to "3.0.3"), ws.tested)
+        assertEquals(9L, ws.stats["events"])
+        val native = CapsuleCodec.fromJson(SpecFixtures.json("capsule-v2/valid/native-adapters.json")["document"] as Map<String, Any?>)
+        assertEquals(DependencyCoverage.DIAGNOSTIC, native.dependency("analytics")!!.coverage)
+    }
+
+    @Test
+    fun writerEmitsV2OnlyWithDependencies() {
+        val minimal = SpecFixtures.json("capsule-v1/valid/minimal.json")["document"] as Map<String, Any?>
+        val v1 = CapsuleCodec.fromJson(minimal)
+        assertEquals(1, CapsuleCodec.toJson(v1)["specVersion"])
+        assertTrue(!CapsuleCodec.toJson(v1).let { (it["manifest"] as Map<*, *>).containsKey("dependencies") })
+        val dep = CapsuleDependency("ws", DependencyKinds.WEBSOCKET, "bugcapsule-okhttp.websocket", "0.5.0", 1, true, DependencyCoverage.COMPLETE)
+        val v2 = v1.copy(manifest = v1.manifest.copy(dependencies = listOf(dep)))
+        val json = CapsuleCodec.toJson(v2)
+        assertEquals(2, json["specVersion"])
+        assertNull(CapsuleValidator.validate(Json.parse(Json.stringify(json))))
+        assertEquals(listOf(dep), CapsuleCodec.decode(CapsuleCodec.encode(v2)).manifest.dependencies)
+    }
+
+    @Test
+    fun aV1DocumentIgnoresDependenciesAndInteractionEvents() {
+        val doc = (SpecFixtures.json("capsule-v1/valid/minimal.json")["document"] as Map<String, Any?>).toMutableMap()
+        val manifest = (doc["manifest"] as Map<String, Any?>).toMutableMap()
+        manifest["dependencies"] = "not validated in v1"
+        doc["manifest"] = manifest
+        doc["events"] = listOf(mapOf("seq" to 1L, "t" to 0L, "type" to "ws.message", "data" to mapOf("conn" to 3L)))
+        val capsule = CapsuleCodec.decode(gz(Json.stringify(doc)))
+        assertTrue(capsule.manifest.dependencies.isEmpty())
+        assertEquals(1, capsule.specVersion)
     }
 
     @Test
@@ -48,8 +91,9 @@ class CodecTest {
 
     @Test
     fun everyInvalidFixtureIsRejectedWithItsPath() {
-        val files = SpecFixtures.files("capsule-v1/invalid")
-        assertTrue(files.size >= 30)
+        assertTrue(SpecFixtures.files("capsule-v1/invalid").size >= 30)
+        assertTrue(SpecFixtures.files("capsule-v2/invalid").size >= 25)
+        val files = SpecFixtures.files("capsule-v1/invalid") + SpecFixtures.files("capsule-v2/invalid")
         for (f in files) {
             val fixture = Json.parse(f.readText()) as Map<String, Any?>
             val path = fixture["errorPath"] as String
@@ -108,8 +152,8 @@ class CodecTest {
     @Test
     fun newerSpecVersionIsUnsupported() {
         val doc = (SpecFixtures.json("capsule-v1/valid/minimal.json")["document"] as Map<String, Any?>).toMutableMap()
-        doc["specVersion"] = 2L
-        expectFormatError(gz(Json.stringify(doc)), "\$.specVersion 2 is newer")
+        doc["specVersion"] = 3L
+        expectFormatError(gz(Json.stringify(doc)), "\$.specVersion 3 is newer than this reader (v2)")
     }
 
     @Test
