@@ -292,6 +292,7 @@ internal class Runtime(
                     if (redacted["bodyEncoding"] == "base64") redacted["responseBody"] = data["responseBody"]
                     if (redacted["requestEncoding"] == "base64") redacted["requestBody"] = data["requestBody"]
                 }
+                if (type == "screenshot") redacted["base64"] = data["base64"] // Binary pixels were masked by the provider.
                 if (type == EventTypes.FAILURE && data["signature"] is String) redacted["signature"] = data["signature"]
                 if (InteractionTypes.isInteraction(type)) {
                     // Match keys hash redacted values and payloads were redacted by the

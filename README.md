@@ -552,3 +552,8 @@ and distribution require prior written permission. See [LICENSE](LICENSE).
 ### Keyboard state during pointer replay
 
 Version 0.4.1-beta.4 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
+
+## Optional capsule screenshots (unreleased)
+
+Opt-in PNG frames are stored inside capsules and displayed against event time.
+See [capture, privacy, limits and platform examples](docs/screenshots-v1.md).
