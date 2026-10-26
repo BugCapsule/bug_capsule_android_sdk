@@ -187,7 +187,54 @@ unwinder are not formally async-signal-safe (best effort); stack overflows on
 threads without an alternate signal stack cannot be recorded; symbols are the
 nearest exported ones until unstripped `.so` files are uploaded (`kind=elf`).
 
+The record also carries the scope: monitoring hands the handler a redacted JSON
+copy of the global scope (breadcrumbs, user, tags, extras, contexts, `app`
+included, at most 64 KiB, oldest breadcrumbs dropped first) at most every
+100 ms, double-buffered so the handler always reads a complete copy. The event
+sent on the next launch uses that scope and the crashed process's release.
+
+### How the previous process ended (`ApplicationExitInfo`, Android 11+)
+
+On launch the SDK reads the app's recent exit records
+(`enableExitInfoTracking`, default on) and reports the ones not reported yet
+(the newest handled timestamp is kept in `monitoring/exit_info.json`; the first
+launch only remembers, it reports nothing older):
+
+| Exit | Event |
+|---|---|
+| `REASON_ANR` | `fatal` `ApplicationNotResponding`, mechanism `anr` (`data.source: exit_info`, `foreground`), the main thread as the exception, every thread from the ANR dump |
+| `REASON_CRASH_NATIVE` | With an NDK record of that pid: the record's event plus the tombstone's other threads and images (Android 12+). Without one: signal, crashing thread, every thread and `elf` images from the tombstone (mechanism `signal`, `data.source: tombstone`); before Android 12 only the system's description |
+| `REASON_LOW_MEMORY` in the foreground | `fatal` `OutOfMemory`, mechanism `oom` |
+
+JVM crashes (`REASON_CRASH`) are not repeated: the uncaught handler reported
+them. These processes could not write anything when they died, so monitoring
+also keeps the scope in `monitoring/scope.json` (at most every second, with
+the process id); an exit record of that pid gets that scope, release and
+environment, any other gets none. A native crash exit makes the recovered
+session `crashed`; ANR and low-memory kills leave it `abnormal`.
+
+JVM crashes and watchdog ANRs list every thread (`threads`): the failing one
+first, then the main thread, then the others by id; at most 100 threads, 40
+frames each, 1,500 frames in all.
+
+### Embedding (`CrashBridge`)
+
+`dev.bugcapsule.android.embedding.CrashBridge` runs the NDK handler, the ANR
+watchdog and the exit records without monitoring's sessions or outbox, for an
+SDK that sends events itself (the Flutter SDK's plugin): `install(context,
+release, environment, options)`, `updateScope(json)` (the embedding SDK's
+redacted scope in event form), `takePendingEvents()` (monitoring-v1 event
+JSON, kept in `noBackupFilesDir/bugcapsule-crash-bridge/events` until taken),
+`lastRunCrashed`, `setListener` (ANRs while running). It refuses to install
+when `BugCapsule.init` already runs monitoring in the process.
+
 ### Gradle plugin details
+
+For every variant, `uploadBugCapsuleNativeSymbols<Variant>` uploads the
+output of `merge<Variant>NativeLibs` (unstripped, before the strip task): each
+`.so` with a GNU build id and a `.symtab` or `.debug_info` section, once per
+build id, as `kind=elf` with `arch` and `name`. It runs after `assemble` /
+`bundle` when a URL and key are set (`uploadNativeSymbols(false)` turns it off).
 
 For every variant with `isMinifyEnabled = true`, the
 `io.github.bugcapsule.gradle` plugin writes

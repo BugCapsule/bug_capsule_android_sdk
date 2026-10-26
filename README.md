@@ -415,12 +415,18 @@ Monitoring runs in every session, whether or not it records a capsule:
 | Signal | What you get |
 |---|---|
 | Errors | Uncaught exceptions, `reportError` / `check` / `fail`, `captureException` / `captureMessage`, **ANRs** (main thread blocked 5 s), **native crashes** with `bugcapsule-ndk` |
-| Release health | One session per foreground run; `crashed` and `abnormal` (killed in the foreground) sessions |
+| How the last run ended (Android 11+) | ANRs the system killed the app for, native crashes (every thread from the tombstone, Android 12+), low-memory kills in the foreground: reported on the next launch from `ApplicationExitInfo` |
+| Release health | One session per foreground run; `crashed` and `abnormal` (killed in the foreground) sessions, counted against the release that ran them |
 | Performance | Activity and Fragment loads (TTID / TTFD), cold and warm start, Navigation and Compose screens, slow and frozen frames, OkHttp and SQLite spans |
 | User feedback | `captureFeedback`, a Views dialog, a Compose sheet, shake to report |
 
 When a capsule is written for an error, the error links to it, so each issue
 lists the capsules that replay it.
+
+Crashes and ANRs list every thread, main thread first. A crash reported on the
+next launch (native crash, ANR kill) carries the breadcrumbs, user, tags and
+release of the process that crashed, not of the launch that reports it.
+`enableExitInfoTracking(false)` turns the exit records off.
 
 ```kotlin
 BugCapsuleConfig.builder()
@@ -462,8 +468,14 @@ bugcapsule {
 
 Set `BUGCAPSULE_SECRET_KEY` (a `bcs_…` key) in your CI secrets, never in the
 app. Without a URL or key the id is still embedded and the upload is skipped;
-`./gradlew uploadBugCapsuleProguardMapping<Variant>` uploads by hand. For NDK
-symbols, see [Release symbols](https://docs.bugcapsule.com/symbols.html).
+`./gradlew uploadBugCapsuleProguardMapping<Variant>` uploads by hand.
+
+The plugin also uploads the unstripped native libraries (`.so` files with a
+build id and symbols, your own and those of your dependencies) of every
+variant, so native crash frames resolve to functions and lines.
+`uploadNativeSymbols.set(false)` turns it off;
+`./gradlew uploadBugCapsuleNativeSymbols<Variant>` uploads by hand. More in
+[Release symbols](https://docs.bugcapsule.com/symbols.html).
 
 ## Privacy
 

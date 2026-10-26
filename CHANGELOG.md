@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Crash reporting: recovered `crashed` / `abnormal` sessions keep the release and environment they ran with, so crash-free rates no longer blame the next release after an update.
+- Native crashes reported on the next launch carry the crashed process's breadcrumbs, user, tags and contexts (`bugcapsule-ndk` writes a mirrored copy of the scope into its crash record).
+- Android 11+: report how the previous process ended from `ApplicationExitInfo`: ANRs the system killed the app for (with the full thread dump), native crashes (every thread and build id from the tombstone on Android 12+, merged with the NDK record when there is one) and foreground low-memory kills. `enableExitInfoTracking(false)` turns it off.
+- JVM crashes and watchdog ANRs list every thread, main thread first.
+- Gradle plugin: `uploadBugCapsuleNativeSymbols<Variant>` uploads unstripped `.so` files (`kind=elf`) after `assemble`/`bundle`; `bugcapsule.uploadNativeSymbols` turns it off.
+- Add `dev.bugcapsule.android.embedding.CrashBridge`: native crash, ANR and exit-record capture for SDKs that send events themselves (the Flutter SDK).
+
 - Read capsule format v2 (interaction dependencies) as well as v1; write v2 only when a capsule has WebSocket or adapter traffic. Readers reject versions newer than 2.
 - Add OkHttp WebSocket capture and offline replay (`BugCapsuleWebSockets`, adapter `bugcapsule-okhttp.websocket`).
 - Add the native SDK adapter API (`NativeAdapter`, `NativeInteractions`) and `NativeAdapterConformance` in `bugcapsule-android-replay` to test adapters in unit tests.
