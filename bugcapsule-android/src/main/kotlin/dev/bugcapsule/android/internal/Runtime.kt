@@ -14,6 +14,7 @@ import dev.bugcapsule.android.StateSerializer
 import dev.bugcapsule.android.core.AppInfo
 import dev.bugcapsule.android.core.Capsule
 import dev.bugcapsule.android.core.CapsuleCodec
+import dev.bugcapsule.android.core.CapsuleDependency
 import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.CapsuleManifest
 import dev.bugcapsule.android.core.CapsuleValidator
@@ -31,6 +32,7 @@ import dev.bugcapsule.android.core.InteractionTypes
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.PlatformInfo
+import dev.bugcapsule.android.core.RecordedWindow
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
@@ -52,6 +54,7 @@ import dev.bugcapsule.android.monitoring.NativeCrashes
 import dev.bugcapsule.android.monitoring.PreviousProcess
 import dev.bugcapsule.android.monitoring.ScreenTracer
 import dev.bugcapsule.android.replay.BugCapsuleReplay
+import dev.bugcapsule.android.replay.CrashReplay
 import dev.bugcapsule.android.replay.InteractionReplay
 import dev.bugcapsule.android.replay.ReplayEngine
 import dev.bugcapsule.android.storage.EarlyRestore
@@ -106,6 +109,10 @@ internal class Runtime(
 
     private val lock = Any()
     private var recorder: FlightRecorder? = null
+
+    /** The recorder mirrored to disk for crashes that leave no time to write a capsule (crash-capsules §1). */
+    @Volatile
+    private var journal: CrashJournal? = null
 
     @Volatile
     var engine: ReplayEngine? = null
@@ -255,7 +262,13 @@ internal class Runtime(
         if (!recording && mon == null) return
         try {
             val clean = sanitizeEvent(type, data) ?: return
-            if (recording) synchronized(lock) { recorder?.add(now(), type, clean) }
+            if (recording) {
+                synchronized(lock) {
+                    val r = recorder
+                    val event = r?.add(now(), type, clean)
+                    if (event != null) journal?.event(event, r.windowStartSeq)
+                }
+            }
             mon?.onRecorded(type, clean)
             if (type == EventTypes.ACTION && mon != null && config.enableUserInteractionTracing) {
                 (clean["id"] as? String)?.let { id -> host.postToMain { screenTracer?.onAction(id) } }
@@ -314,6 +327,11 @@ internal class Runtime(
     // -------------------------------------------------------------- startup
 
     fun start() {
+        if (BugCapsuleReplay.isPostMortem() && host.isDebuggable) {
+            // Judging how a replayed attempt died: this process must not capture, report or upload.
+            SdkLog.i("replay post-mortem: capture is off in this process")
+            return
+        }
         val armed = BugCapsuleReplay.armed()
         if (armed != null) {
             if (host.isDebuggable) {
@@ -386,6 +404,8 @@ internal class Runtime(
         captureBodies = config.captureNetworkBodies && (cached?.captureNetworkBodies ?: true)
         maxCapsuleBytes = cached?.maxCapsuleBytes ?: maxCapsuleBytes
         val record = decideRecording(cached)
+        // Before the previous processes' crashes are reported: a journal left with this pid is theirs.
+        val journalDir = if (record) CrashCapsules.prepare(File(s.root, CrashCapsules.DIR), android.os.Process.myPid()) else null
 
         for (integration in integrations) {
             try {
@@ -400,6 +420,10 @@ internal class Runtime(
             SdkLog.w("monitoring setup failed; the app runs without it: $e")
             monitoring = null
         }
+        // After the crashes of earlier processes were reported (same executor): unclaimed journals go.
+        schedule(0) {
+            CrashCapsules.cleanup(File(s.root, CrashCapsules.DIR), { pid -> CrashCapsules.isAlive(pid, host.context.packageName) })
+        }
         capture = AndroidCapture(this, host).also { it.install() }
         if (monitoring != null) installErrorHandler()
         if (record) {
@@ -412,8 +436,12 @@ internal class Runtime(
             )
             synchronized(lock) {
                 recorder = FlightRecorder(launch, config.maxEvents, config.windowMs)
+                if (journalDir != null) {
+                    journal = CrashJournal(journalDir, { 2 * maxCapsuleBytes }).also { it.checkpoint(launch, 0) }
+                }
             }
             recording = true
+            if (journal != null) schedule(0) { refreshJournalHeader() }
             installErrorHandler()
             schedulePeriodicCheckpoint()
         }
@@ -485,14 +513,18 @@ internal class Runtime(
             // Tombstones and ANR dumps can be large: read them off the calling thread.
             monitoringEnv.submit {
                 previous.report(monitoringEnv.app.id, mon.inApp) { c ->
+                    val linked = crashCapsule(c, s, mon)
+                    if (c.alreadyReported) return@report
                     mon.captureRaw(
-                        Level.FATAL, Hint(null, c.mechanism, null), fatal = false,
+                        Level.FATAL, Hint(null, c.mechanism, linked?.capsuleId), fatal = false,
                         timestampMs = c.timestampMs,
-                        releaseOverride = c.release,
-                        environmentOverride = c.environment,
+                        releaseOverride = c.release ?: linked?.release,
+                        environmentOverride = c.environment ?: linked?.environment,
                         countInSession = false,
                         previousScope = c.scope,
-                        fill = c.fill,
+                        capsuleId = linked?.capsuleId,
+                        eventId = linked?.eventId,
+                        fill = linked?.fill ?: c.fill,
                     )
                 }
             }
@@ -507,8 +539,11 @@ internal class Runtime(
                 mainThread = android.os.Looper.getMainLooper().thread,
                 isForeground = { foreground },
                 onAnr = { stack, blocked ->
-                    if (mainProcess) PreviousProcess.noteWatchdogAnr(watchdogAnrFile)
-                    mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false) { ev ->
+                    // The id first: if the system kills the app for this hang, its crash capsule links to this event.
+                    val eventId = Ids.uuidV4()
+                    if (mainProcess) PreviousProcess.noteWatchdogAnr(watchdogAnrFile, eventId)
+                    journal?.flush()
+                    mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false, eventId = eventId) { ev ->
                         AnrWatchdog.fill(ev, stack, blocked, config.anrTimeoutMs, android.os.Looper.getMainLooper().thread, mon.inApp)
                     }
                 },
@@ -614,12 +649,14 @@ internal class Runtime(
         val replaying = engine
         if (replaying != null) {
             val failure = FailureRecord.exception(error, now(), currentRedactor::scrubText)
-            replaying.onFailure(failure)
+            replaying.onFailure(failure, fatal = true)
             // The process dies right after: report synchronously now.
             replaying.finishNow("the app crashed: ${failure.signature}")
             return
         }
         onError(error, fatal = true)
+        // The JVM crash wrote its capsule synchronously; the next launch has nothing to build from the journal.
+        journal?.close(delete = true)
     }
 
     /**
@@ -667,6 +704,7 @@ internal class Runtime(
         }
         val event = failure.toJson().toMutableMap().also { it.remove("stack") }
         record(EventTypes.FAILURE, event)
+        journal?.flush()
         lastFailure = failure
         val capture = seenSignatures.add(failure.signature) &&
             config.autoCaptureOnFailure &&
@@ -700,10 +738,12 @@ internal class Runtime(
         anchorMs = now()
         wallAtAnchorMs = System.currentTimeMillis()
         if (engine != null) BugCapsuleReplay.anchorReached()
+        if (journal != null) schedule(0) { refreshJournalHeader() }
     }
 
     fun onLifecycle(state: String) {
         record(EventTypes.LIFECYCLE, mapOf("state" to state))
+        if (state == "paused") journal?.flush()
         val mon = monitoring
         if (mon != null) {
             when (state) {
@@ -789,9 +829,12 @@ internal class Runtime(
             val data = snapshot(CheckpointKind.PERIODIC)
             synchronized(lock) {
                 if (recorder === r) {
-                    r.addCheckpoint(Checkpoint(CheckpointKind.PERIODIC, t, System.currentTimeMillis(), afterSeq, data))
+                    val checkpoint = Checkpoint(CheckpointKind.PERIODIC, t, System.currentTimeMillis(), afterSeq, data)
+                    r.addCheckpoint(checkpoint)
+                    journal?.checkpoint(checkpoint, r.windowStartSeq)
                 }
             }
+            if (journal != null) schedule(0) { refreshJournalHeader() }
         } catch (e: Throwable) {
             warnOnce("periodic checkpoint failed: $e")
         }
@@ -882,93 +925,29 @@ internal class Runtime(
         if (window.hasGap) {
             eligibility.missing("events.window", "events between the checkpoint and the window were evicted; raise window or maxEvents")
         }
-        for (integration in integrations) {
-            try {
-                integration.describeEligibility(eligibility, window)
-            } catch (e: Throwable) {
-                eligibility.missing("integration.${integration.name}", "eligibility check failed: $e")
-            }
-        }
         val dependencies = try {
             interactionRecorder.dependencies(window.events)
         } catch (e: Throwable) {
             SdkLog.w("interaction dependencies failed: $e")
             emptyList()
         }
-        for (d in dependencies) {
-            if (d.gaps.isEmpty()) continue
-            eligibility.missing(
-                "dependency.${d.id}",
-                "${d.adapter} coverage is partial: " + d.gaps.joinToString(", ") { g -> g.code + (g.count?.let { "×$it" } ?: "") },
-            )
-        }
-        if (window.checkpoint.kind == CheckpointKind.PERIODIC) {
-            val open = J.list(J.obj(window.checkpoint.data[INTERACTIONS_KEY])?.get("open")) ?: emptyList()
-            val blocked = open.mapNotNull { J.obj(it) }.filter { it["restorable"] != true }
-            if (blocked.isNotEmpty()) {
-                eligibility.missing(
-                    "interactions.restore",
-                    "${blocked.size} connection(s)/subscription(s) were open at the periodic checkpoint and cannot be restored",
-                    blocking = true,
-                )
-            }
-        }
-        if (states.isNotEmpty() && window.checkpoint.kind == CheckpointKind.PERIODIC) {
-            val stateData = J.obj(window.checkpoint.data[STATE_KEY]) ?: emptyMap()
-            for ((k, v) in stateData) {
-                if (StorageValues.containsPlaceholder(v)) eligibility.missing("state.$k", "state redacted on device")
-            }
-        }
+        windowEligibility(eligibility, window, dependencies)
 
-        val pkg = host.packageInfo()
-        val screen = host.screen()
         val events = window.events.map { it.shift(anchor) }
-        val capabilities = LinkedHashMap(BASE_CAPABILITIES)
-        for (integration in integrations) {
-            try {
-                capabilities.putAll(integration.capabilities())
-            } catch (_: Throwable) {
-            }
-        }
         val capsule = Capsule(
-            manifest = CapsuleManifest(
+            manifest = manifest(
                 capsuleId = capsuleId,
-                createdAtMs = System.currentTimeMillis(),
-                mode = mode,
-                app = AppInfo(
-                    id = cut(config.appId ?: pkg.id, 200),
-                    name = (config.appName ?: pkg.name)?.let { cut(it, 200) },
-                    version = cut(config.appVersion ?: pkg.version, 200),
-                    build = cut(config.appBuild ?: pkg.build, 200),
-                    flavor = config.flavor?.let { cut(it, 200) },
-                ),
-                gitSha = sha,
-                dirty = gitDirty,
-                sdkName = SDK_NAME,
-                sdkVersion = dev.bugcapsule.android.BuildConfig.SDK_VERSION,
-                stateSchemaVersion = config.stateSchemaVersion,
-                platform = PlatformInfo(
-                    os = "android",
-                    osVersion = host.osVersion(),
-                    locale = host.locale(),
-                    screenWidth = screen.widthDp,
-                    screenHeight = screen.heightDp,
-                    pixelRatio = screen.density,
-                ),
-                session = SessionInfo(sessionId, startedAtMs, wallAtAnchor, seed, now() - anchor),
+                wallAtAnchor = wallAtAnchor,
+                durationMs = now() - anchor,
+                labels = labels,
+                dependencies = dependencies,
+            ).copy(
                 failure = failure?.shift(anchor),
                 eligibility = eligibility.build(),
-                integrations = integrations.map { it.name },
                 eventCount = events.size,
                 droppedEvents = window.droppedEvents,
                 checkpointKind = window.checkpoint.kind,
-                labels = sanitizeLabels(config.labels + labels),
-                redactionKeys = currentRedactor.extraKeys,
-                redactionHeaders = currentRedactor.extraHeaders,
-                runtime = RuntimeInfo("android", host.apiLevel().toString(), "kotlin", frameworks.toList()),
-                capabilities = capabilities,
                 monitoring = monitoringLink ?: failure?.let { monitoringLink(failureEvents[it.signature], monitoring) },
-                dependencies = dependencies,
             ),
             checkpoint = window.checkpoint.shift(anchor),
             events = events,
@@ -1010,6 +989,206 @@ internal class Runtime(
             }
         }
         return CaptureResult(capsule.manifest.capsuleId, file, capsule.manifest.eligibility, failure?.signature, upload)
+    }
+
+    /** Eligibility gaps of [window] beyond the build and the recorder: integrations, dependencies, what a periodic checkpoint cannot restore. */
+    private fun windowEligibility(eligibility: EligibilityBuilder, window: RecordedWindow, dependencies: List<CapsuleDependency>) {
+        for (integration in integrations) {
+            try {
+                integration.describeEligibility(eligibility, window)
+            } catch (e: Throwable) {
+                eligibility.missing("integration.${integration.name}", "eligibility check failed: $e")
+            }
+        }
+        for (d in dependencies) {
+            if (d.gaps.isEmpty()) continue
+            eligibility.missing(
+                "dependency.${d.id}",
+                "${d.adapter} coverage is partial: " + d.gaps.joinToString(", ") { g -> g.code + (g.count?.let { "×$it" } ?: "") },
+            )
+        }
+        if (window.checkpoint.kind == CheckpointKind.PERIODIC) {
+            val open = J.list(J.obj(window.checkpoint.data[INTERACTIONS_KEY])?.get("open")) ?: emptyList()
+            val blocked = open.mapNotNull { J.obj(it) }.filter { it["restorable"] != true }
+            if (blocked.isNotEmpty()) {
+                eligibility.missing(
+                    "interactions.restore",
+                    "${blocked.size} connection(s)/subscription(s) were open at the periodic checkpoint and cannot be restored",
+                    blocking = true,
+                )
+            }
+            val stateData = J.obj(window.checkpoint.data[STATE_KEY]) ?: emptyMap()
+            for ((k, v) in stateData) {
+                if (StorageValues.containsPlaceholder(v)) eligibility.missing("state.$k", "state redacted on device")
+            }
+        }
+    }
+
+    /** The manifest fields this session knows at any time; the caller fills failure, eligibility and stats. */
+    private fun manifest(
+        capsuleId: String,
+        wallAtAnchor: Long,
+        durationMs: Long,
+        labels: Map<String, String>,
+        dependencies: List<CapsuleDependency>,
+    ): CapsuleManifest {
+        val pkg = host.packageInfo()
+        val screen = host.screen()
+        val capabilities = LinkedHashMap(BASE_CAPABILITIES)
+        for (integration in integrations) {
+            try {
+                capabilities.putAll(integration.capabilities())
+            } catch (_: Throwable) {
+            }
+        }
+        return CapsuleManifest(
+            capsuleId = capsuleId,
+            createdAtMs = System.currentTimeMillis(),
+            mode = mode,
+            app = AppInfo(
+                id = cut(config.appId ?: pkg.id, 200),
+                name = (config.appName ?: pkg.name)?.let { cut(it, 200) },
+                version = cut(config.appVersion ?: pkg.version, 200),
+                build = cut(config.appBuild ?: pkg.build, 200),
+                flavor = config.flavor?.let { cut(it, 200) },
+            ),
+            gitSha = gitSha,
+            dirty = gitDirty,
+            sdkName = SDK_NAME,
+            sdkVersion = dev.bugcapsule.android.BuildConfig.SDK_VERSION,
+            stateSchemaVersion = config.stateSchemaVersion,
+            platform = PlatformInfo(
+                os = "android",
+                osVersion = host.osVersion(),
+                locale = host.locale(),
+                screenWidth = screen.widthDp,
+                screenHeight = screen.heightDp,
+                pixelRatio = screen.density,
+            ),
+            session = SessionInfo(sessionId, startedAtMs, wallAtAnchor, seed, durationMs),
+            eligibility = dev.bugcapsule.android.core.Eligibility(dev.bugcapsule.android.core.EligibilityStatus.ELIGIBLE, emptyList()),
+            integrations = integrations.map { it.name },
+            eventCount = 0,
+            droppedEvents = 0,
+            checkpointKind = CheckpointKind.LAUNCH,
+            labels = sanitizeLabels(config.labels + labels),
+            redactionKeys = currentRedactor.extraKeys,
+            redactionHeaders = currentRedactor.extraHeaders,
+            runtime = RuntimeInfo("android", host.apiLevel().toString(), "kotlin", frameworks.toList()),
+            capabilities = capabilities,
+            dependencies = dependencies,
+        )
+    }
+
+    // -------------------------------------------------------- crash journal
+
+    /**
+     * Writes `header.json` (crash-capsules §1): the manifest fields known
+     * now, plus `pid`, `release`, `environment`, `writtenAt` and the
+     * recorder time of the session anchor (`anchorT`, null before the first
+     * frame). Runs on the executor; rewritten only when it changed.
+     */
+    private fun refreshJournalHeader() {
+        val j = journal ?: return
+        try {
+            val dependencies = try {
+                interactionRecorder.dependencies(emptyList(), all = true)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            val anchor = anchorMs
+            val m = manifest("journal", wallAtAnchorMs ?: 0, 0, emptyMap(), dependencies).toJson()
+            val header = linkedMapOf<String, Any?>("journal" to 1)
+            for (key in JOURNAL_HEADER_KEYS) m[key]?.let { header[key] = it }
+            header["session"] = LinkedHashMap(J.obj(m["session"])!!).also {
+                it.remove("durationMs")
+                if (anchor == null) it.remove("wallClockAtAnchorMs")
+            }
+            header["anchorT"] = anchor
+            header["pid"] = android.os.Process.myPid()
+            header["release"] = monitoring?.release
+            header["environment"] = monitoring?.environment
+            header["writtenAt"] = dev.bugcapsule.android.core.Iso8601.format(System.currentTimeMillis())
+            j.header(header)
+        } catch (e: Throwable) {
+            warnOnce("crash journal header failed: $e")
+        }
+    }
+
+    /** Tests: this process's journal directory once everything recorded so far is on disk; null when not journaling. */
+    internal fun syncJournal(timeoutMs: Long = 5_000): File? {
+        val j = journal ?: return null
+        executor.submit {}.get(timeoutMs, TimeUnit.MILLISECONDS) // header writes are queued on the executor
+        return if (j.sync(timeoutMs)) j.dir else null
+    }
+
+    /** After the recorder rewrote its buffer, the journal must not keep what it dropped or redacted. */
+    private fun resetJournal() {
+        if (journal == null) return
+        synchronized(lock) {
+            val r = recorder ?: return
+            val (checkpoints, events) = r.retained()
+            journal?.reset(checkpoints, events, r.windowStartSeq)
+        }
+        refreshJournalHeader()
+    }
+
+    /** A crash capsule queued for an earlier process's fatal event, and how to fill that event. */
+    private class LinkedCrash(
+        val capsuleId: String?,
+        val eventId: String,
+        val release: String?,
+        val environment: String?,
+        val fill: (MutableMap<String, Any?>) -> Unit,
+    )
+
+    /**
+     * Builds the crash capsule of [c] from its process's journal (crash-capsules
+     * §2) and queues it; the journal is deleted. Null without a journal.
+     * Crash capsules do not count against `maxCapsulesPerSession`.
+     */
+    private fun crashCapsule(c: PreviousProcess.Crash, s: CapsuleStore, mon: Monitoring): LinkedCrash? {
+        val pid = c.pid ?: return null
+        if (killed || remote?.current?.enabled == false) return null
+        val dir = CrashCapsules.find(File(s.root, CrashCapsules.DIR), pid) ?: return null
+        return try {
+            val journal = CrashCapsules.read(dir) ?: return null
+            // Filled once: tombstones and ANR dumps are read here, and the event reuses it.
+            val ev = LinkedHashMap<String, Any?>()
+            c.fill(ev)
+            val fill: (MutableMap<String, Any?>) -> Unit = { it.putAll(ev) }
+            val eventId = c.reportedEventId ?: Ids.uuidV4()
+            val release = c.release ?: J.str(journal.header["release"])
+            val environment = c.environment ?: J.str(journal.header["environment"])
+            val capsuleId = Ids.uuidV4()
+            val link = linkedMapOf<String, Any?>(
+                "eventId" to eventId,
+                "release" to (release ?: mon.release),
+                "environment" to (environment ?: mon.environment),
+            )
+            val built = CrashCapsules.build(
+                journal,
+                CrashCapsules.Crash(capsuleId, CrashCapsules.failureOf(ev, c.mechanism), c.mechanism, c.timestampMs, link),
+                maxCapsuleBytes,
+                ::windowEligibility,
+            )
+            var queued = false
+            if (built != null) {
+                try {
+                    s.save(capsuleId, built.bytes)
+                    queued = outbox?.enqueue(capsuleId, built.bytes) ?: true
+                } catch (e: Exception) {
+                    SdkLog.w("could not save crash capsule $capsuleId: ${e.message}")
+                }
+                if (queued) SdkLog.i("crash capsule $capsuleId built from the journal of pid $pid (${c.mechanism})")
+            }
+            LinkedCrash(if (queued) capsuleId else null, eventId, release, environment, fill)
+        } catch (e: Throwable) {
+            SdkLog.w("could not build the crash capsule of pid $pid: $e")
+            null
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     private fun sanitizeLabels(labels: Map<String, String>): Map<String, String> {
@@ -1087,7 +1266,9 @@ internal class Runtime(
             }
         }
         val bodies = config.captureNetworkBodies && next.captureNetworkBodies
+        var rewritten = false
         if (captureBodies && !bodies) {
+            rewritten = true
             synchronized(lock) {
                 recorder?.rewrite(
                     event = { e ->
@@ -1100,9 +1281,10 @@ internal class Runtime(
                 )
             }
         }
-        dropDisabledAdapters(previous, next)
+        if (dropDisabledAdapters(previous, next)) rewritten = true
         captureBodies = bodies
         if (currentRedactor.extraKeys != (config.redactKeys + next.redactKeys).distinct()) {
+            rewritten = true
             currentRedactor = baseRedactor(next.redactKeys)
             try {
                 synchronized(lock) {
@@ -1129,6 +1311,7 @@ internal class Runtime(
                 stopRecording()
             }
         }
+        if (rewritten) resetJournal()
     }
 
     /** Payload objects of an interaction event once payload capture is off: `omitted`, size and kind kept. */
@@ -1151,11 +1334,12 @@ internal class Runtime(
     }
 
     /** Remote `disabledAdapters` (capsule-v2 §7): newly disabled adapters lose their buffered events; HTTP is untouched. */
-    private fun dropDisabledAdapters(previous: RemoteCaptureConfig?, next: RemoteCaptureConfig) {
+    /** True when buffered events were dropped. */
+    private fun dropDisabledAdapters(previous: RemoteCaptureConfig?, next: RemoteCaptureConfig): Boolean {
         val newly = next.disabledAdapters.toSet() - (previous?.disabledAdapters ?: emptyList()).toSet()
-        if (newly.isEmpty()) return
+        if (newly.isEmpty()) return false
         val deps = interactionRecorder.recorders().filter { it.descriptor.adapter in newly }.map { it.descriptor.id }.toSet()
-        if (deps.isEmpty()) return
+        if (deps.isEmpty()) return false
         SdkLog.i("interaction adapters disabled by remote config: ${newly.joinToString()}")
         synchronized(lock) {
             recorder?.rewrite(
@@ -1169,6 +1353,7 @@ internal class Runtime(
                 },
             )
         }
+        return true
     }
 
     private fun withoutBodies(data: Map<String, Any?>): Map<String, Any?> {
@@ -1182,7 +1367,11 @@ internal class Runtime(
 
     private fun stopRecording() {
         recording = false
-        synchronized(lock) { recorder = null }
+        synchronized(lock) {
+            recorder = null
+            journal?.close(delete = true)
+            journal = null
+        }
         checkpointTask?.let { host.removeFromMain(it) }
         checkpointTask = null
     }
@@ -1258,7 +1447,10 @@ internal class Runtime(
             BugCapsuleReplay.publishEngine(null)
             return
         }
-        val e = ReplayEngine(capsule, settings, actions, gitSha, armed.reporter)
+        val e = ReplayEngine(
+            capsule, settings, actions, gitSha, armed.reporter,
+            attemptMarker = CrashReplay.markerFile(host.context.noBackupFilesDir),
+        )
         engine = e
         e.precheck()
         for (d in armed.earlyDivergences) e.diverge(d.type, d.detail)
@@ -1416,6 +1608,12 @@ internal class Runtime(
 
         /** capsule-v2 §6: `checkpoint.data.interactions` (open connections and subscriptions). */
         const val INTERACTIONS_KEY = "interactions"
+
+        /** Manifest fields copied into the crash journal's header (crash-capsules §1). */
+        private val JOURNAL_HEADER_KEYS = listOf(
+            "mode", "app", "source", "sdk", "stateSchemaVersion", "platform",
+            "integrations", "labels", "redaction", "runtime", "capabilities", "dependencies",
+        )
 
         val BASE_CAPABILITIES: Map<String, String> = linkedMapOf(
             "input.pointer.capture" to "supported",

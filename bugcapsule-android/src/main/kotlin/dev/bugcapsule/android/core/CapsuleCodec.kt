@@ -26,7 +26,8 @@ object CapsuleCodec {
     fun toJson(capsule: Capsule): Map<String, Any?> = linkedMapOf(
         "format" to FORMAT,
         "specVersion" to capsule.specVersion,
-        "manifest" to capsule.manifest.toJson(),
+        // v2 requires `dependencies`, empty for a crash capsule without interactions.
+        "manifest" to capsule.manifest.toJson().also { if (capsule.specVersion >= 2) it.putIfAbsent("dependencies", emptyList<Any?>()) },
         "checkpoint" to capsule.checkpoint.toJson(),
         "events" to capsule.events.map { it.toJson() },
     )

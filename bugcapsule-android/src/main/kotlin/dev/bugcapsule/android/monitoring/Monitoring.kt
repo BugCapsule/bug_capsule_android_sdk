@@ -245,8 +245,11 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         environmentOverride: String? = null,
         countInSession: Boolean = true,
         previousScope: Map<String, Any?>? = null,
+        /** A capsule already queued for this event (crash capsules), with the [eventId] it links to. */
+        capsuleId: String? = null,
+        eventId: String? = null,
         fill: (MutableMap<String, Any?>) -> Unit,
-    ): Captured? = capture(level, null, fatal, null, hint, timestampMs, releaseOverride, environmentOverride, countInSession, previousScope, fill)
+    ): Captured? = capture(level, null, fatal, capsuleId, hint, timestampMs, releaseOverride, environmentOverride, countInSession, previousScope, eventId, fill)
 
     private fun capture(
         level: Level,
@@ -259,12 +262,13 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         environmentOverride: String? = null,
         countInSession: Boolean = true,
         previousScope: Map<String, Any?>? = null,
+        presetEventId: String? = null,
         fill: (MutableMap<String, Any?>) -> Unit,
     ): Captured? {
         if (!active) return null
         return try {
             val snap = if (previousScope != null) Scope(0).snapshot() else currentScope().snapshot()
-            val eventId = CoreIds.uuidV4()
+            val eventId = presetEventId ?: CoreIds.uuidV4()
             val ev = linkedMapOf<String, Any?>(
                 "eventId" to eventId,
                 "timestamp" to Iso8601.format(timestampMs ?: env.nowMs()),

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Crash capsules: a recording session keeps a crash journal (`journal/<pid>/` in the SDK's storage: header, checkpoints, events; one background writer, flushed every 250 ms, at most `2 × maxCapsuleBytes`). The next launch builds a capsule (format v2, failure kind `crash`, gap `crash.native`, `labels.source = crash_journal`, `stats.journalGapMs`) for a native crash, an ANR kill or a foreground low-memory kill of that process, queues it and links it to the crash's event (`capsuleId`, `manifest.monitoring`). Crash capsules do not count against `maxCapsulesPerSession`. An ANR the watchdog already reported gets a capsule linked to that event.
+- Capsule reader and validator accept failure kind `crash` (v2) with `failure.crash` and `stats.journalGapMs`.
+- Replay of crash capsules: the attempt is `reproduced` when the app dies the same way (same signal, ANR, low-memory kill), `inconclusive` with `reasonCode: failure.different` when it dies another way, `not_reproduced` when it lives to the end of the window. Reports gain the outcome `inconclusive`, `reasonCode` and `death`. A post-mortem step (`-e bugcapsuleReplayPostMortem true`, `BugCapsuleReplayTest#judgeProcessDeath`) reports an attempt whose process died before it could, from the system's exit record.
+- `CrashBridge` events of earlier processes carry `contexts.process.pid`.
+
 - Crash reporting: recovered `crashed` / `abnormal` sessions keep the release and environment they ran with, so crash-free rates no longer blame the next release after an update.
 - Native crashes reported on the next launch carry the crashed process's breadcrumbs, user, tags and contexts (`bugcapsule-ndk` writes a mirrored copy of the scope into its crash record).
 - Android 11+: report how the previous process ended from `ApplicationExitInfo`: ANRs the system killed the app for (with the full thread dump), native crashes (every thread and build id from the tombstone on Android 12+, merged with the NDK record when there is one) and foreground low-memory kills. `enableExitInfoTracking(false)` turns it off.

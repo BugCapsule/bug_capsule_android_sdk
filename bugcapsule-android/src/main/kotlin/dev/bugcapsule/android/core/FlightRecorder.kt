@@ -74,12 +74,23 @@ class FlightRecorder @JvmOverloads constructor(
 
     fun window(): RecordedWindow {
         if (launchCoversWindow) return RecordedWindow(launch, events.toList(), 0, false)
-        var chosen: Checkpoint? = periodic.firstOrNull { it.afterSeq >= lastEvictedSeq }
-        val hasGap = chosen == null
-        if (chosen == null) chosen = periodic.lastOrNull() ?: launch
+        val chosen = windowCheckpoint()
         val from = chosen.afterSeq
-        return RecordedWindow(chosen, events.filter { it.seq > from }, dropped, hasGap)
+        return RecordedWindow(chosen, events.filter { it.seq > from }, dropped, chosen.afterSeq < lastEvictedSeq)
     }
+
+    /** The checkpoint [window] starts at (cheap: no copy). */
+    fun windowCheckpoint(): Checkpoint {
+        if (launchCoversWindow) return launch
+        return periodic.firstOrNull { it.afterSeq >= lastEvictedSeq } ?: periodic.lastOrNull() ?: launch
+    }
+
+    /** `afterSeq` of [windowCheckpoint]: what the crash journal must keep events after. */
+    val windowStartSeq: Long get() = windowCheckpoint().afterSeq
+
+    /** Every retained checkpoint (launch first while it covers the window) and event: the crash journal's content after a [rewrite]. */
+    fun retained(): Pair<List<Checkpoint>, List<CapsuleEvent>> =
+        ((if (launchCoversWindow) listOf(launch) else emptyList()) + periodic) to events.toList()
 
     private fun evict(now: Long) {
         while (events.isNotEmpty() && (events.size > maxEvents || events.first().t < now - windowMs)) {
