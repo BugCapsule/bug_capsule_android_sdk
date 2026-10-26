@@ -4,9 +4,11 @@ import com.android.build.api.artifact.SingleArtifact
 import com.android.build.api.variant.ApplicationAndroidComponentsExtension
 import com.android.build.api.variant.ApplicationVariant
 import org.gradle.api.Project
+import org.gradle.api.tasks.TaskProvider
 
 /**
- * Per-variant wiring through the AGP Variant API. Kept apart from [BugCapsulePlugin]
+ * Per-variant wiring through the AGP Variant API: ProGuard mapping id and upload
+ * (minified variants), native symbol upload (every variant). Kept apart from [BugCapsulePlugin]
  * so AGP classes load only when `com.android.application` is applied.
  *
  * No task cycle: the mapping is produced by `minify<Variant>WithR8`, whose inputs are
@@ -20,6 +22,12 @@ internal object AndroidIntegration {
     }
 
     private fun configureVariant(project: Project, extension: BugCapsuleExtension, variant: ApplicationVariant) {
+        val suffix = variant.name.replaceFirstChar { it.uppercaseChar() }
+        configureNativeSymbols(project, extension, variant, suffix)
+        configureProguard(project, extension, variant, suffix)
+    }
+
+    private fun configureProguard(project: Project, extension: BugCapsuleExtension, variant: ApplicationVariant, suffix: String) {
         if (!variant.isMinifyEnabled) {
             project.logger.info("BugCapsule: variant '{}' is not minified, no ProGuard mapping to handle", variant.name)
             return
@@ -29,7 +37,6 @@ internal object AndroidIntegration {
             project.logger.warn("BugCapsule: variant '{}' has no assets source set; mapping id not embedded", variant.name)
             return
         }
-        val suffix = variant.name.replaceFirstChar { it.uppercaseChar() }
         val mapping = variant.artifacts.get(SingleArtifact.OBFUSCATION_MAPPING_FILE)
 
         val generate = project.tasks.register("generateBugCapsuleProguardUuid$suffix", GenerateProguardUuidTask::class.java) {
@@ -48,9 +55,38 @@ internal object AndroidIntegration {
             it.secretKey.set(extension.secretKey)
             it.failOnUploadError.set(extension.failOnUploadError)
         }
+        finalizeLifecycle(project, extension, variant.name, suffix, upload, extension.uploadProguardMapping.get(), "bugcapsule.uploadProguardMapping")
+    }
 
+    /**
+     * `merge<Variant>NativeLibs` holds the variant's `.so` files before the strip task:
+     * the app's own and those of its AARs (Flutter's engine and plugins included).
+     */
+    private fun configureNativeSymbols(project: Project, extension: BugCapsuleExtension, variant: ApplicationVariant, suffix: String) {
+        val mergeTask = "merge${suffix}NativeLibs"
+        val upload = project.tasks.register("uploadBugCapsuleNativeSymbols$suffix", UploadNativeSymbolsTask::class.java) {
+            it.group = TASK_GROUP
+            it.description = "Uploads the unstripped native libraries of the '${variant.name}' variant to BugCapsule."
+            it.nativeLibs.from(project.tasks.matching { t -> t.name == mergeTask }.map { t -> t.outputs.files })
+            it.url.set(extension.url)
+            it.secretKey.set(extension.secretKey)
+            it.failOnUploadError.set(extension.failOnUploadError)
+        }
+        finalizeLifecycle(project, extension, variant.name, suffix, upload, extension.uploadNativeSymbols.get(), "bugcapsule.uploadNativeSymbols")
+    }
+
+    /** Runs [upload] after `assemble<Variant>`/`bundle<Variant>` unless turned off or url/key are missing. */
+    private fun finalizeLifecycle(
+        project: Project,
+        extension: BugCapsuleExtension,
+        variantName: String,
+        suffix: String,
+        upload: TaskProvider<*>,
+        enabled: Boolean,
+        switch: String,
+    ) {
         val skipReason = when {
-            !extension.uploadProguardMapping.get() -> "bugcapsule.uploadProguardMapping is false"
+            !enabled -> "$switch is false"
             extension.url.orNull.isNullOrBlank() -> "no url (bugcapsule.url, -PbugcapsuleUrl or BUGCAPSULE_URL)"
             extension.secretKey.orNull.isNullOrBlank() ->
                 "no secret key (bugcapsule.secretKey, -PbugcapsuleSecretKey or BUGCAPSULE_SECRET_KEY)"
@@ -58,8 +94,8 @@ internal object AndroidIntegration {
         }
         if (skipReason != null) {
             project.logger.info(
-                "BugCapsule: automatic ProGuard mapping upload for '{}' disabled: {}. Run {} to upload manually.",
-                variant.name, skipReason, upload.name,
+                "BugCapsule: automatic {} for '{}' disabled: {}. Run it to upload manually.",
+                upload.name, variantName, skipReason,
             )
             return
         }
