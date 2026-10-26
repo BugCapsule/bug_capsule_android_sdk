@@ -83,6 +83,7 @@ class MonitoringIntegrationTest {
 
     @After
     fun tearDown() {
+        dev.bugcapsule.android.internal.exitInfoOverride = null
         BugCapsule.resetForTest()
         BugCapsule.testOverrides = null
         server.shutdown()
@@ -376,11 +377,65 @@ class MonitoringIntegrationTest {
     }
 
     @Test
+    fun anAnrTheSystemKilledTheAppForIsReportedWithThatProcessesScopeAndThreads() {
+        java.io.File(tmp.root, "monitoring").mkdirs()
+        java.io.File(tmp.root, "monitoring/exit_info.json").writeText("{\"lastTimestamp\":1761000000000}")
+        java.io.File(tmp.root, "monitoring/scope.json").writeText(
+            "{\"pid\":777,\"release\":\"com.shop@0.9.0+8\",\"environment\":\"production\",\"user\":{\"id\":\"u_anr\"},\"tags\":{\"screen\":\"cart\"}}",
+        )
+        val trace = ExitReasonsTest.ANR_TRACE.toByteArray()
+        dev.bugcapsule.android.internal.exitInfoOverride = ExitInfoSource {
+            listOf(
+                ExitRecord(777, ExitRecord.REASON_ANR, 1761000005000, 100, "Input dispatching timed out", app.packageName) { trace.inputStream() },
+                ExitRecord(776, ExitRecord.REASON_ANR, 1760000000000, 100, "already handled", app.packageName) { null },
+            )
+        }
+        start()
+        flushAll()
+        val event = items("event").single()
+        assertEquals("fatal", event["level"])
+        assertEquals("com.shop@0.9.0+8", event["release"])
+        assertEquals("production", event["environment"])
+        assertEquals("u_anr", J.obj(event["user"])!!["id"])
+        assertEquals("cart", J.obj(event["tags"])!!["screen"])
+        val value = J.obj(J.list(J.obj(event["exception"])!!["values"])!!.single())!!
+        assertEquals("ApplicationNotResponding", value["type"])
+        assertEquals("Input dispatching timed out", value["value"])
+        assertEquals(3, J.list(event["threads"])!!.size)
+        // Seen once: the next start does not report it again.
+        assertTrue(java.io.File(tmp.root, "monitoring/exit_info.json").readText().contains("1761000005000"))
+    }
+
+    @Test
+    fun aNativeCrashRecordGainsTheOtherThreadsOfItsTombstone() {
+        val root = java.io.File(tmp.root, "native").apply { mkdirs() }
+        java.io.File(root, "123-1761000000000.crash").writeText(
+            "bugcapsule-native-crash 1\nsignal 11\ncode 1\naddress 0x0\ntid 124\nthread RenderThread\ntimestamp 1761000000500\nabi arm64-v8a\n" +
+                "frame 0x7a00001234 0x7a00000000 0x7a00001200 /data/app/x/lib/arm64/libshop.so checkout_native\nend\n",
+        )
+        java.io.File(tmp.root, "monitoring").mkdirs()
+        java.io.File(tmp.root, "monitoring/exit_info.json").writeText("{\"lastTimestamp\":1761000000000}")
+        val stone = ExitReasonsTest().tombstoneBytes()
+        dev.bugcapsule.android.internal.exitInfoOverride = ExitInfoSource {
+            listOf(ExitRecord(123, ExitRecord.REASON_CRASH_NATIVE, 1761000000600, 100, null, app.packageName) { stone.inputStream() })
+        }
+        start()
+        flushAll()
+        val event = items("event").single()
+        assertEquals("SIGSEGV", J.obj(J.list(J.obj(event["exception"])!!["values"])!!.single())!!["type"])
+        val threads = J.list(event["threads"])!!.map { J.obj(it)!! }
+        assertEquals(listOf(124L, 123L), threads.map { (it["id"] as Number).toLong() })
+        assertEquals(true, threads[0]["crashed"])
+        assertNotNull("the tombstone's main thread has its stack", threads[1]["stacktrace"])
+    }
+
+    @Test
     fun theScopeIsMirroredAsOneLineOfRedactedJsonWithinTheNativeBuffer() {
         start()
         val mon = runtime().monitoring!!
         val mirrored = Collections.synchronizedList(ArrayList<ByteArray>())
-        mon.mirrorScopeTo { mirrored.add(it) }
+        val scopeFile = java.io.File(tmp.root, "mirrored-scope.json")
+        mon.mirrorScope({ mirrored.add(it) }, scopeFile)
         BugCapsule.setUser(User(id = "u_7"))
         BugCapsule.setTag("screen", "checkout")
         BugCapsule.addBreadcrumb(Breadcrumb("tapped pay", data = mapOf("password" to "hunter2")))
@@ -393,6 +448,10 @@ class MonitoringIntegrationTest {
         assertEquals("tapped pay", crumb["message"])
         assertFalse("redacted before it reaches disk", String(mirrored.last()).contains("hunter2"))
         assertNotNull(J.obj(J.obj(json["contexts"])!!["app"]))
+        assertEquals(android.os.Process.myPid(), (json["pid"] as Number).toInt())
+        assertEquals(mon.release, json["release"])
+        mon.mirrorScopeNow(force = true)
+        assertEquals("u_7", J.obj(J.obj(Json.parse(scopeFile.readText()))!!["user"])!!["id"])
 
         // Over 64 KiB: the oldest breadcrumbs go, the newest stay.
         repeat(100) { i -> BugCapsule.addBreadcrumb(Breadcrumb("crumb $i", data = mapOf("blob" to "x".repeat(2_000)))) }

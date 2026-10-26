@@ -5,9 +5,9 @@ import dev.bugcapsule.android.BugCapsuleConfig
 import dev.bugcapsule.android.BugCapsuleIntegration
 import dev.bugcapsule.android.BugCapsuleSession
 import dev.bugcapsule.android.BugCapsuleStatus
+import dev.bugcapsule.android.CaptureResult
 import dev.bugcapsule.android.ConnectionSource
 import dev.bugcapsule.android.ConnectionState
-import dev.bugcapsule.android.CaptureResult
 import dev.bugcapsule.android.ReplayContext
 import dev.bugcapsule.android.StateRestorer
 import dev.bugcapsule.android.StateSerializer
@@ -20,14 +20,14 @@ import dev.bugcapsule.android.core.CapsuleValidator
 import dev.bugcapsule.android.core.CaptureMode
 import dev.bugcapsule.android.core.Checkpoint
 import dev.bugcapsule.android.core.CheckpointKind
+import dev.bugcapsule.android.core.DependencyGaps
 import dev.bugcapsule.android.core.EligibilityBuilder
 import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.core.FlightRecorder
-import dev.bugcapsule.android.core.DependencyGaps
+import dev.bugcapsule.android.core.Ids
 import dev.bugcapsule.android.core.InteractionRecorder
 import dev.bugcapsule.android.core.InteractionTypes
-import dev.bugcapsule.android.core.Ids
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.PlatformInfo
@@ -36,10 +36,16 @@ import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.RuntimeInfo
 import dev.bugcapsule.android.core.SessionInfo
+import dev.bugcapsule.android.feedback.BugCapsuleFeedbackDialog
+import dev.bugcapsule.android.feedback.ShakeDetector
 import dev.bugcapsule.android.monitoring.AnrWatchdog
 import dev.bugcapsule.android.monitoring.AppIdentity
 import dev.bugcapsule.android.monitoring.DeviceInfo
+import dev.bugcapsule.android.monitoring.ElfBuildId
 import dev.bugcapsule.android.monitoring.ExceptionMapper
+import dev.bugcapsule.android.monitoring.ExitInfoSource
+import dev.bugcapsule.android.monitoring.ExitReasons
+import dev.bugcapsule.android.monitoring.ExitRecord
 import dev.bugcapsule.android.monitoring.Hint
 import dev.bugcapsule.android.monitoring.HttpSpanHandle
 import dev.bugcapsule.android.monitoring.Level
@@ -48,9 +54,7 @@ import dev.bugcapsule.android.monitoring.MonitoringEnvironment
 import dev.bugcapsule.android.monitoring.NativeCrashRecord
 import dev.bugcapsule.android.monitoring.NativeCrashes
 import dev.bugcapsule.android.monitoring.ScreenTracer
-import dev.bugcapsule.android.monitoring.ElfBuildId
-import dev.bugcapsule.android.feedback.BugCapsuleFeedbackDialog
-import dev.bugcapsule.android.feedback.ShakeDetector
+import dev.bugcapsule.android.monitoring.Tombstone
 import dev.bugcapsule.android.replay.BugCapsuleReplay
 import dev.bugcapsule.android.replay.InteractionReplay
 import dev.bugcapsule.android.replay.ReplayEngine
@@ -76,6 +80,10 @@ class BugCapsuleTestOverrides @JvmOverloads constructor(
 )
 
 internal const val SDK_NAME = "bugcapsule-android"
+
+/** Tests: the system exit records the next start reads (null: the system's, when enabled). */
+@Volatile
+internal var exitInfoOverride: ExitInfoSource? = null
 
 /**
  * The BugCapsule runtime of one process: capture (recorder, checkpoints,
@@ -467,33 +475,44 @@ internal class Runtime(
         monitoring = mon
         val threads = overrides?.monitoringThreads ?: true
 
-        // What the previous process left behind: native crash records, an unfinished session.
+        // What the previous process left behind: native crash records, the
+        // system's exit records, its scope, an unfinished session.
         val native = NativeCrashes(File(s.root, "native"))
-        var crashedAt: Long? = null
-        for (file in native.pending()) {
-            try {
-                val record = NativeCrashRecord.parse(file.readText())
-                if (record != null) {
-                    val ctx = native.previousContext()
-                    crashedAt = maxOf(crashedAt ?: 0L, record.timestampMs ?: file.lastModified())
-                    mon.captureRaw(
-                        Level.FATAL, Hint(null, "signal", null), fatal = false,
-                        timestampMs = record.timestampMs,
-                        releaseOverride = ctx["release"] as? String,
-                        environmentOverride = ctx["environment"] as? String,
-                        countInSession = false,
-                        previousScope = record.scope,
-                    ) { ev -> NativeCrashes.fill(ev, record, monitoringEnv.app.id, ElfBuildId::forPath) }
-                }
+        val records = native.pending().map { file ->
+            file to try {
+                NativeCrashRecord.parse(file.readText())
             } catch (e: Throwable) {
                 SdkLog.w("could not read native crash record ${file.name}: $e")
+                null
             }
-            native.delete(file)
+        }
+        val exitSource: ExitInfoSource? = exitInfoOverride ?: if (threads && config.enableExitInfoTracking) ExitInfoSource(::systemExits) else null
+        val exits = exitSource?.let {
+            ExitReasons(File(monitoringEnv.dir, "exit_info.json"), host.application.packageName, it).takeNew().filter(ExitReasons::reportable)
+        } ?: emptyList()
+        val scopeFile = File(monitoringEnv.dir, "scope.json")
+        val previousScope = try {
+            if (scopeFile.exists()) J.obj(Json.parse(scopeFile.readText())) else null
+        } catch (_: Exception) {
+            null
+        }
+        var crashedAt: Long? = null
+        for ((file, record) in records) {
+            if (record != null) crashedAt = maxOf(crashedAt ?: 0L, record.timestampMs ?: file.lastModified())
+        }
+        for (exit in exits) {
+            if (exit.reason == ExitRecord.REASON_CRASH_NATIVE) crashedAt = maxOf(crashedAt ?: 0L, exit.timestampMs)
         }
         mon.sessions?.recoverPrevious(crashedAt)
-        if (threads && config.enableNativeCrashHandling && native.install(mon.release, mon.environment)) {
-            mon.mirrorScopeTo { json -> native.setScope(json) }
+        if (records.isNotEmpty() || exits.isNotEmpty()) {
+            val ctx = native.previousContext()
+            // Tombstones and ANR dumps can be large: read them off the calling thread.
+            monitoringEnv.submit {
+                reportPreviousProcess(mon, native, records, exits, ctx, previousScope)
+            }
         }
+        val nativeInstalled = threads && config.enableNativeCrashHandling && native.install(mon.release, mon.environment)
+        mon.mirrorScope(if (nativeInstalled) { json -> native.setScope(json) } else null, scopeFile)
 
         if (threads && config.enableAnrTracking) {
             anrWatchdog = AnrWatchdog(
@@ -524,6 +543,87 @@ internal class Runtime(
                     }
                 }
             })
+        }
+    }
+
+    /**
+     * Reports how earlier processes ended: our native crash records (with
+     * the tombstone's other threads when Android kept one for that pid), and
+     * the system's exit records nothing else reported (ANR kills, native
+     * crashes without a record, foreground low-memory kills).
+     */
+    private fun reportPreviousProcess(
+        mon: Monitoring,
+        native: NativeCrashes,
+        records: List<Pair<File, NativeCrashRecord?>>,
+        exits: List<ExitRecord>,
+        ctx: Map<String, Any?>,
+        previousScope: Map<String, Any?>?,
+    ) {
+        val appId = monitoringEnv.app.id
+        val used = HashSet<ExitRecord>()
+        fun tombstone(exit: ExitRecord?): Tombstone? =
+            if (exit == null) null else exit.openTrace()?.use { Tombstone.parse(it.readBytes()) }
+        for ((file, record) in records) {
+            try {
+                if (record != null) {
+                    val pid = file.name.substringBefore('-').toIntOrNull()
+                    val exit = exits.firstOrNull { it.reason == ExitRecord.REASON_CRASH_NATIVE && it.pid == pid }
+                    exit?.let { used.add(it) }
+                    val stone = tombstone(exit)
+                    val scope = record.scope ?: previousScope?.takeIf { (it["pid"] as? Number)?.toInt() == pid }
+                    mon.captureRaw(
+                        Level.FATAL, Hint(null, "signal", null), fatal = false,
+                        timestampMs = record.timestampMs,
+                        releaseOverride = J.str(scope?.get("release")) ?: ctx["release"] as? String,
+                        environmentOverride = J.str(scope?.get("environment")) ?: ctx["environment"] as? String,
+                        countInSession = false,
+                        previousScope = scope,
+                    ) { ev ->
+                        NativeCrashes.fill(ev, record, appId, ElfBuildId::forPath)
+                        if (stone != null) ExitReasons.addTombstoneThreads(ev, stone, appId)
+                    }
+                }
+            } catch (e: Throwable) {
+                SdkLog.w("could not report native crash record ${file.name}: $e")
+            }
+            native.delete(file)
+        }
+        for (exit in exits) {
+            if (exit in used) continue
+            try {
+                val scope = previousScope?.takeIf { (it["pid"] as? Number)?.toInt() == exit.pid }
+                val mechanism = when (exit.reason) {
+                    ExitRecord.REASON_ANR -> "anr"
+                    ExitRecord.REASON_LOW_MEMORY -> "oom"
+                    else -> "signal"
+                }
+                mon.captureRaw(
+                    Level.FATAL, Hint(null, mechanism, null), fatal = false,
+                    timestampMs = exit.timestampMs,
+                    releaseOverride = J.str(scope?.get("release")),
+                    environmentOverride = J.str(scope?.get("environment")),
+                    countInSession = false,
+                    previousScope = scope ?: emptyMap(),
+                ) { ev ->
+                    when (exit.reason) {
+                        ExitRecord.REASON_ANR -> ExitReasons.fillAnr(ev, exit, mon.inApp)
+                        ExitRecord.REASON_LOW_MEMORY -> ExitReasons.fillLowMemory(ev, exit)
+                        else -> ExitReasons.fillNativeFromTombstone(ev, exit, tombstone(exit), appId)
+                    }
+                }
+            } catch (e: Throwable) {
+                SdkLog.w("could not report exit record of pid ${exit.pid}: $e")
+            }
+        }
+    }
+
+    /** This app's recent exit records from the system (API 30+). */
+    private fun systemExits(): List<ExitRecord> {
+        if (android.os.Build.VERSION.SDK_INT < 30) return emptyList()
+        val am = host.context.getSystemService(android.app.ActivityManager::class.java) ?: return emptyList()
+        return am.getHistoricalProcessExitReasons(null, 0, 16).map { info ->
+            ExitRecord(info.pid, info.reason, info.timestamp, info.importance, info.description, info.processName) { info.traceInputStream }
         }
     }
 

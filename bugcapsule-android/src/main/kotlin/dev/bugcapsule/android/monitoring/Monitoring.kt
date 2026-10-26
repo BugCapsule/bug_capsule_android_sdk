@@ -195,6 +195,8 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         hint = Hint(error, mechanism.type, capsuleId),
     ) { ev ->
         ev["exception"] = linkedMapOf("values" to ExceptionMapper.values(error, mechanism, inApp, env.redactor::scrubText))
+        // A crash: what every other thread was doing (the crashing one's stack is the exception's).
+        if (fatal) ev["threads"] = ThreadDump.threads(Thread.currentThread(), Thread.currentThread(), inApp)
     }
 
     fun captureMessage(message: String, level: Level, options: CaptureOptions? = null): Captured? =
@@ -370,25 +372,33 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
     // ---------------------------------------------------- crash-time scope
 
     @Volatile
-    private var scopeSink: ((ByteArray) -> Unit)? = null
+    private var nativeScopeSink: ((ByteArray) -> Unit)? = null
+
+    @Volatile
+    private var scopeFile: File? = null
 
     @Volatile
     private var mirrorScheduled = false
 
+    @Volatile
+    private var lastScopeFileWriteMs = 0L
+
     /**
-     * Keeps [sink] (the native crash handler) up to date with the global
-     * scope, at most every [SCOPE_MIRROR_DELAY_MS], so a native crash
-     * reported on the next launch carries the crashed process's breadcrumbs,
-     * user, tags and contexts.
+     * Keeps a copy of the global scope where the next launch can find it:
+     * in [nativeSink] (the NDK handler's buffer, written into its crash
+     * record) at most every [SCOPE_MIRROR_DELAY_MS], and in [file] at most
+     * every [SCOPE_FILE_INTERVAL_MS] (for exits the process cannot record
+     * itself: ANRs and low-memory kills, see [ExitReasons]).
      */
-    fun mirrorScopeTo(sink: (ByteArray) -> Unit) {
-        scopeSink = sink
+    fun mirrorScope(nativeSink: ((ByteArray) -> Unit)?, file: File?) {
+        nativeScopeSink = nativeSink
+        scopeFile = file
         scope.onChange = { scheduleMirror() }
         scheduleMirror()
     }
 
     private fun scheduleMirror() {
-        if (scopeSink == null || mirrorScheduled) return
+        if ((nativeScopeSink == null && scopeFile == null) || mirrorScheduled) return
         mirrorScheduled = true
         env.schedule(SCOPE_MIRROR_DELAY_MS) {
             mirrorScheduled = false
@@ -396,20 +406,39 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         }
     }
 
-    internal fun mirrorScopeNow() {
-        val sink = scopeSink ?: return
+    /** [force]: write the file now even within [SCOPE_FILE_INTERVAL_MS] (tests). */
+    internal fun mirrorScopeNow(force: Boolean = false) {
         if (!active) return
+        val sink = nativeScopeSink
+        val file = scopeFile
+        if (sink == null && file == null) return
         try {
-            sink(scopeJson(scope.snapshot()))
+            val json = scopeJson(scope.snapshot())
+            sink?.invoke(json)
+            if (file != null) {
+                val now = env.nowMs()
+                if (force || now - lastScopeFileWriteMs >= SCOPE_FILE_INTERVAL_MS) {
+                    lastScopeFileWriteMs = now
+                    dev.bugcapsule.android.internal.Files.writeAtomically(file, json)
+                } else if (!mirrorScheduled) {
+                    // Changed within the interval: one trailing write keeps the file current.
+                    mirrorScheduled = true
+                    env.schedule(SCOPE_FILE_INTERVAL_MS - (now - lastScopeFileWriteMs)) {
+                        mirrorScheduled = false
+                        mirrorScopeNow()
+                    }
+                }
+            }
         } catch (e: Throwable) {
-            SdkLog.once("could not mirror the scope for native crashes: $e")
+            SdkLog.once("could not mirror the scope for crash reports: $e")
         }
     }
 
     /**
-     * The scope parts of an event (redacted, `app` context included) as one
-     * line of JSON of at most [CRASH_SCOPE_MAX_BYTES]: the oldest
-     * breadcrumbs go first, then extras and contexts.
+     * The scope parts of an event (redacted, `app` context included) plus
+     * this process's `pid`, `release` and `environment`, as one line of JSON
+     * of at most [CRASH_SCOPE_MAX_BYTES]: the oldest breadcrumbs go first,
+     * then extras and contexts.
      */
     internal fun scopeJson(snap: Scope.Snapshot): ByteArray {
         val contexts = LinkedHashMap<String, Any?>()
@@ -422,6 +451,9 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         var withExtras = true
         while (true) {
             val m = linkedMapOf<String, Any?>(
+                "pid" to android.os.Process.myPid(),
+                "release" to release,
+                "environment" to environment,
                 "level" to snap.level?.wire,
                 "fingerprint" to snap.fingerprint,
                 "tags" to snap.tags,
@@ -758,6 +790,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         const val SDK_NAME = "bugcapsule-android"
         const val FLUSH_DELAY_MS = 2_000L
         const val SCOPE_MIRROR_DELAY_MS = 100L
+        const val SCOPE_FILE_INTERVAL_MS = 1_000L
 
         /** The native handler's scope buffer (bc_ndk_set_scope) is 64 KiB. */
         const val CRASH_SCOPE_MAX_BYTES = 64 * 1024
