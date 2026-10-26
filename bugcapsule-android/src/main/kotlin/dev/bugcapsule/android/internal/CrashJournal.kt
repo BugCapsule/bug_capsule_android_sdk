@@ -43,13 +43,13 @@ internal class CrashJournal(
     private class Event(val event: CapsuleEvent, val keepFrom: Long) : Op()
     private class Point(val checkpoint: Checkpoint, val keepFrom: Long) : Op()
     private class Header(val json: Map<String, Any?>) : Op()
-    private class Reset(val checkpoints: List<Checkpoint>, val events: List<CapsuleEvent>, val keepFrom: Long) : Op()
+    private class Reset(val checkpoints: List<Checkpoint>, val events: List<CapsuleEvent>, val keepFrom: Long, val lastSeq: Long) : Op()
     private object Flush : Op()
     private class Barrier(val latch: CountDownLatch) : Op()
 
     private val queue = LinkedBlockingQueue<Op>(queueCapacity)
 
-    /** An event did not fit in the queue: the journal has a hole until the next checkpoint. */
+    /** An op did not fit in the queue: the journal has a hole (or stale data) until the next checkpoint. */
     private val lost = AtomicBoolean(false)
 
     @Volatile
@@ -61,6 +61,10 @@ internal class CrashJournal(
     private val checkpointsDir = File(dir, "checkpoints")
     private val eventsDir = File(dir, "events")
     private val headerFile = File(dir, "header.json")
+    private val droppedFile = File(dir, DROPPED_FILE)
+
+    /** `[first, last]` seq ranges the recorder dropped in a rewrite: not holes, the builder skips them. */
+    private val dropped = ArrayList<LongArray>()
 
     // Writer thread state.
     private val pending = StringBuilder()
@@ -98,8 +102,13 @@ internal class CrashJournal(
     /** Rewrites `header.json` when [json] differs from the last one written. */
     fun header(json: Map<String, Any?>) = enqueue(Header(json))
 
-    /** After the recorder rewrote its buffer (redaction rules, adapters turned off): the journal becomes its new content. */
-    fun reset(checkpoints: List<Checkpoint>, events: List<CapsuleEvent>, keepFrom: Long) = enqueue(Reset(checkpoints, events, keepFrom))
+    /**
+     * After the recorder rewrote its buffer (redaction rules, adapters turned
+     * off): the journal becomes its new content. [lastSeq]: the recorder's,
+     * so events it dropped are told apart from lost ones.
+     */
+    fun reset(checkpoints: List<Checkpoint>, events: List<CapsuleEvent>, keepFrom: Long, lastSeq: Long) =
+        enqueue(Reset(checkpoints, events, keepFrom, lastSeq))
 
     /** Writes buffered events now (a recorded failure, the app going to the background). */
     fun flush() = enqueue(Flush)
@@ -123,7 +132,8 @@ internal class CrashJournal(
     private fun enqueue(op: Op): Boolean {
         if (closed) return false
         if (queue.offer(op)) return true
-        if (op is Event) lost.set(true)
+        // A lost reset would leave data the recorder re-redacted: drop everything instead.
+        if (op !is Barrier && op !is Flush) lost.set(true)
         return false
     }
 
@@ -165,12 +175,12 @@ internal class CrashJournal(
 
     /** Returns true when the op asks for an immediate flush. */
     private fun handle(op: Op): Boolean {
+        if (lost.getAndSet(false)) {
+            pending.setLength(0)
+            loseAll()
+        }
         when (op) {
             is Event -> {
-                if (lost.getAndSet(false)) {
-                    pending.setLength(0)
-                    loseAll()
-                }
                 if (discarding) return false
                 if (newFileAtNextEvent) {
                     if (pending.isNotEmpty()) writePending()
@@ -210,6 +220,7 @@ internal class CrashJournal(
                 val kept = keptCheckpoints(op.checkpoints.map { it.afterSeq }.toSortedSet(), op.keepFrom)
                 val checkpoints = op.checkpoints.filter { it.afterSeq in kept }.distinctBy { it.afterSeq }
                 for (c in checkpoints) writeCheckpoint(c)
+                if (checkpoints.isNotEmpty()) noteDropped(checkpoints.minOf { it.afterSeq }, op.events, op.lastSeq)
                 keepFrom = op.keepFrom
                 if (checkpoints.isNotEmpty()) {
                     discarding = false
@@ -236,6 +247,23 @@ internal class CrashJournal(
             is Barrier -> return true
         }
         return false
+    }
+
+    /** Records the seqs after [from] up to [lastSeq] that [events] no longer has (`dropped.json`). */
+    private fun noteDropped(from: Long, events: List<CapsuleEvent>, lastSeq: Long) {
+        val present = events.mapTo(HashSet()) { it.seq }
+        var start = -1L
+        for (seq in from + 1..lastSeq + 1) {
+            val missing = seq <= lastSeq && seq !in present
+            if (missing && start < 0) start = seq
+            if (!missing && start >= 0) {
+                dropped.add(longArrayOf(start, seq - 1))
+                start = -1
+            }
+        }
+        if (dropped.isEmpty()) return
+        val bytes = Json.stringify(dropped.map { listOf(it[0], it[1]) }).toByteArray(Charsets.UTF_8)
+        locked { Files.writeAtomically(droppedFile, bytes) }
     }
 
     private inline fun locked(block: () -> Unit) {
@@ -337,5 +365,6 @@ internal class CrashJournal(
 
     companion object {
         const val FLUSH_INTERVAL_MS = 250L
+        const val DROPPED_FILE = "dropped.json"
     }
 }

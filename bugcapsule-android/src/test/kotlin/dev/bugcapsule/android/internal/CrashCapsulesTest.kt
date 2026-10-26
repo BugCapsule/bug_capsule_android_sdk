@@ -236,8 +236,9 @@ class CrashCapsulesTest {
         val mine = CrashCapsules.prepare(root, 456)
         assertFalse(mine.exists())
         assertNotNull(CrashCapsules.find(root, 456))
-
         mine.mkdirs()
+        assertEquals("never this process's own live journal", root.listFiles()!!.single { it.name.startsWith("456-") }, CrashCapsules.find(root, 456, myPid = 456))
+
         CrashCapsules.cleanup(root, { it == 457 || it == 456 })
         assertFalse(dead.exists())
         assertFalse(older.exists())

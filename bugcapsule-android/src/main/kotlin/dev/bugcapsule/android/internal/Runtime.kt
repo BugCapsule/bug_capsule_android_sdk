@@ -421,8 +421,11 @@ internal class Runtime(
             monitoring = null
         }
         // After the crashes of earlier processes were reported (same executor): unclaimed journals go.
-        schedule(0) {
-            CrashCapsules.cleanup(File(s.root, CrashCapsules.DIR), { pid -> CrashCapsules.isAlive(pid, host.context.packageName) })
+        // Only the main process reads exit records: another process must not delete a journal it would claim.
+        if (PreviousProcess.isMainProcess(host.context)) {
+            schedule(0) {
+                CrashCapsules.cleanup(File(s.root, CrashCapsules.DIR), { pid -> CrashCapsules.isAlive(pid, host.context.packageName) })
+            }
         }
         capture = AndroidCapture(this, host).also { it.install() }
         if (monitoring != null) installErrorHandler()
@@ -539,12 +542,15 @@ internal class Runtime(
                 mainThread = android.os.Looper.getMainLooper().thread,
                 isForeground = { foreground },
                 onAnr = { stack, blocked ->
-                    // The id first: if the system kills the app for this hang, its crash capsule links to this event.
-                    val eventId = Ids.uuidV4()
-                    if (mainProcess) PreviousProcess.noteWatchdogAnr(watchdogAnrFile, eventId)
+                    if (mainProcess) PreviousProcess.noteWatchdogAnr(watchdogAnrFile)
                     journal?.flush()
-                    mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false, eventId = eventId) { ev ->
+                    val captured = mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false) { ev ->
                         AnrWatchdog.fill(ev, stack, blocked, config.anrTimeoutMs, android.os.Looper.getMainLooper().thread, mon.inApp)
+                    }
+                    if (mainProcess) {
+                        // Sent: if the system kills the app for this hang, its crash capsule links to this event.
+                        // Sampled out or dropped by beforeSend: the ANR exit is reported as a fatal event instead.
+                        if (captured != null) PreviousProcess.noteWatchdogAnr(watchdogAnrFile, captured.eventId) else Files.deleteQuietly(watchdogAnrFile)
                     }
                 },
             ).also { it.start() }
@@ -1128,7 +1134,7 @@ internal class Runtime(
         synchronized(lock) {
             val r = recorder ?: return
             val (checkpoints, events) = r.retained()
-            journal?.reset(checkpoints, events, r.windowStartSeq)
+            journal?.reset(checkpoints, events, r.windowStartSeq, r.lastSeq)
         }
         refreshJournalHeader()
     }
@@ -1367,11 +1373,12 @@ internal class Runtime(
 
     private fun stopRecording() {
         recording = false
-        synchronized(lock) {
+        val stopped = synchronized(lock) {
             recorder = null
-            journal?.close(delete = true)
-            journal = null
+            journal.also { journal = null }
         }
+        // Outside the lock: closing waits for a write in progress, record() must not.
+        stopped?.close(delete = true)
         checkpointTask?.let { host.removeFromMain(it) }
         checkpointTask = null
     }

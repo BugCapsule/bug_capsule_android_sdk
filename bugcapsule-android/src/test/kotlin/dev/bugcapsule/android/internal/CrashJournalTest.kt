@@ -202,7 +202,7 @@ class CrashJournalTest {
         // New redaction rules: the recorder rewrites its buffer, the journal follows.
         r.recorder.rewrite(event = { e -> e.copy(data = e.data + ("member" to "[REDACTED]")) })
         val (checkpoints, events) = r.recorder.retained()
-        r.journal.reset(checkpoints, events, r.recorder.windowStartSeq)
+        r.journal.reset(checkpoints, events, r.recorder.windowStartSeq, r.recorder.lastSeq)
         assertTrue(r.journal.sync(5_000))
         val text = File(tmp.root, "journal/4242").walkTopDown().filter { it.isFile }.joinToString("\n") { it.readText() }
         assertFalse(text.contains("M-1234") || text.contains("M-5678"))
@@ -235,5 +235,39 @@ class CrashJournalTest {
         val contents = CrashCapsules.read(dir)
         assertNotNull(contents)
         assertEquals("the torn last line is skipped", listOf(1L), contents!!.events.map { it.seq })
+    }
+
+    @Test
+    fun eventsARewriteDroppedAreNotAHoleInTheJournal() {
+        val r = recording()
+        r.event()
+        r.event("http", mapOf("key" to "GET a/"))
+        r.event()
+        r.event("http", mapOf("key" to "GET b/"))
+        assertTrue(r.journal.sync(5_000))
+        // New redaction keys: the recorder drops buffered http events.
+        r.recorder.rewrite(event = { e -> if (e.type == "http") null else e })
+        val (checkpoints, events) = r.recorder.retained()
+        r.journal.reset(checkpoints, events, r.recorder.windowStartSeq, r.recorder.lastSeq)
+        r.event()
+        assertTrue(r.journal.sync(5_000))
+        val contents = CrashCapsules.read(File(tmp.root, "journal/4242"))!!
+        assertEquals(listOf(1L, 3L, 5L), contents.events.map { it.seq })
+        assertEquals(listOf(2L..2L, 4L..4L), contents.dropped)
+        val header = linkedMapOf<String, Any?>(
+            "mode" to "qa", "app" to mapOf("version" to "1", "build" to "1"), "sdk" to mapOf("name" to "bugcapsule-android", "version" to "1"),
+            "stateSchemaVersion" to 1, "platform" to mapOf("os" to "android"),
+            "session" to mapOf("id" to "s", "startedAt" to "2025-10-20T22:40:00.000Z", "seed" to 1), "anchorT" to 0,
+        )
+        val built = CrashCapsules.build(
+            CrashCapsules.Contents(header, contents.checkpoints, contents.events, contents.dropped),
+            CrashCapsules.Crash("c4a5c0de-0000-4000-8000-000000000009", dev.bugcapsule.android.core.FailureRecord.crash("SIGSEGV", "", 0, "signal"), "signal", null, mapOf("eventId" to "e")),
+            5_000_000, { _, _, _ -> },
+        )!!
+        val capsule = dev.bugcapsule.android.core.CapsuleCodec.decode(built.bytes)
+        assertEquals("launch still covers the window", CheckpointKind.LAUNCH, capsule.checkpoint.kind)
+        val missing = capsule.manifest.eligibility.missing.map { it.dependency }
+        assertFalse(missing.contains("events.window"))
+        assertTrue(missing.contains("events.redaction"))
     }
 }

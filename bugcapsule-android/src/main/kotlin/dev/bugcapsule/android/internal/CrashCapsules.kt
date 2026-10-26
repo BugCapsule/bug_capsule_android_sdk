@@ -40,10 +40,14 @@ internal object CrashCapsules {
         return dir
     }
 
-    /** The newest journal of [pid] not older than [MAX_AGE_MS], or null. */
-    fun find(root: File, pid: Int, nowMs: Long = System.currentTimeMillis()): File? =
+    /**
+     * The newest journal of [pid] not older than [MAX_AGE_MS], or null.
+     * When [pid] is this process's (reused), `journal/<pid>` is this
+     * process's own live journal: only the moved-aside ones count.
+     */
+    fun find(root: File, pid: Int, nowMs: Long = System.currentTimeMillis(), myPid: Int = android.os.Process.myPid()): File? =
         (root.listFiles() ?: emptyArray())
-            .filter { it.isDirectory && (it.name == pid.toString() || it.name.startsWith("$pid-")) }
+            .filter { it.isDirectory && ((it.name == pid.toString() && pid != myPid) || it.name.startsWith("$pid-")) }
             .filter { nowMs - newest(it) <= MAX_AGE_MS }
             .maxByOrNull { newest(it) }
 
@@ -78,8 +82,18 @@ internal object CrashCapsules {
         return t
     }
 
-    /** A journal as read back: header, checkpoints by `afterSeq`, events by `seq`. */
-    class Contents(val header: Map<String, Any?>, val checkpoints: List<Checkpoint>, val events: List<CapsuleEvent>)
+    /**
+     * A journal as read back: header, checkpoints by `afterSeq`, events by
+     * `seq`, and the seq ranges the recorder dropped when it rewrote its buffer.
+     */
+    class Contents(
+        val header: Map<String, Any?>,
+        val checkpoints: List<Checkpoint>,
+        val events: List<CapsuleEvent>,
+        val dropped: List<LongRange> = emptyList(),
+    ) {
+        fun wasDropped(seq: Long): Boolean = dropped.any { seq in it }
+    }
 
     /** Reads [dir]; null without a header or checkpoint, or when larger than [MAX_READ_BYTES]. Torn lines are skipped. */
     fun read(dir: File): Contents? {
@@ -111,7 +125,15 @@ internal object CrashCapsules {
                 }
             }
         }
-        return Contents(header, checkpoints, events.distinctBy { it.seq }.sortedBy { it.seq })
+        val dropped = try {
+            (J.list(Json.parse(File(dir, CrashJournal.DROPPED_FILE).readText())) ?: emptyList()).mapNotNull { r ->
+                val pair = J.list(r) ?: return@mapNotNull null
+                J.long(pair[0])!!..J.long(pair[1])!!
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return Contents(header, checkpoints, events.distinctBy { it.seq }.sortedBy { it.seq }, dropped)
     }
 
     /** The crash a capsule is built for. */
@@ -157,11 +179,12 @@ internal object CrashCapsules {
         return null
     }
 
-    /** Every event after [checkpoint] is in the journal (none was evicted or lost). */
+    /** Every event after [checkpoint] is in the journal (none was evicted or lost; dropped by a rewrite is not lost). */
     private fun complete(journal: Contents, checkpoint: Checkpoint): Boolean {
         var expected = checkpoint.afterSeq + 1
         for (e in journal.events) {
             if (e.seq <= checkpoint.afterSeq) continue
+            while (expected < e.seq && journal.wasDropped(expected)) expected++
             if (e.seq != expected) return false
             expected++
         }
@@ -205,6 +228,10 @@ internal object CrashCapsules {
         eligibility.missing("crash.native", GAP_REASON)
         if (hasGap) {
             eligibility.missing("events.window", "events between the checkpoint and the crash were evicted or lost; raise window or maxEvents")
+        }
+        val rewritten = journal.dropped.sumOf { r -> maxOf(0L, r.last - maxOf(r.first, checkpoint.afterSeq + 1) + 1) }
+        if (rewritten > 0) {
+            eligibility.missing("events.redaction", "$rewritten buffered events were dropped when redaction rules changed")
         }
         val window = RecordedWindow(checkpoint, events, 0, hasGap)
         try {
