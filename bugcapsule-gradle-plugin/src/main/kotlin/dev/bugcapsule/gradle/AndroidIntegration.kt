@@ -67,10 +67,17 @@ internal object AndroidIntegration {
         val upload = project.tasks.register("uploadBugCapsuleNativeSymbols$suffix", UploadNativeSymbolsTask::class.java) {
             it.group = TASK_GROUP
             it.description = "Uploads the unstripped native libraries of the '${variant.name}' variant to BugCapsule."
-            it.nativeLibs.from(project.tasks.matching { t -> t.name == mergeTask }.map { t -> t.outputs.files })
+            // A lazy task collection: resolved (outputs and task dependency) only when the upload runs.
+            it.nativeLibs.from(project.tasks.matching { t -> t.name == mergeTask })
             it.url.set(extension.url)
             it.secretKey.set(extension.secretKey)
             it.failOnUploadError.set(extension.failOnUploadError)
+        }
+        // Debuggable builds (every Run from the IDE) are not shipped and their libraries are large:
+        // the task exists for them, but only runs when asked.
+        if (variant.debuggable) {
+            project.logger.info("BugCapsule: variant '{}' is debuggable, run {} to upload its native symbols", variant.name, upload.name)
+            return
         }
         finalizeLifecycle(project, extension, variant.name, suffix, upload, extension.uploadNativeSymbols.get(), "bugcapsule.uploadNativeSymbols")
     }

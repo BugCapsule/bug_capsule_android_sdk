@@ -33,7 +33,52 @@ class ExitReasonsTest {
             exit(1, ExitRecord.REASON_ANR, 1_000),
         )
         assertEquals(listOf(2, 3), reasons.takeNew().map { it.pid })
+        assertEquals("not handled until its event is queued", listOf(2, 3), reasons.takeNew().map { it.pid })
+        reasons.markHandled(2_000)
+        assertEquals(listOf(3), reasons.takeNew().map { it.pid })
+        reasons.markHandled(3_000)
+        reasons.markHandled(1_000) // never goes back
         assertTrue("each exit once", reasons.takeNew().isEmpty())
+    }
+
+    @Test
+    fun onAFreshInstallTheFirstAnrCounts() {
+        val state = File(tmp.root, "exit_info.json")
+        var exits = emptyList<ExitRecord>()
+        val reasons = ExitReasons(state, "com.shop") { exits }
+        assertTrue(reasons.takeNew().isEmpty())
+        exits = listOf(exit(7, ExitRecord.REASON_ANR, 5_000))
+        assertEquals(listOf(7), reasons.takeNew().map { it.pid })
+    }
+
+    @Test
+    fun anAnrTheWatchdogReportedIsNotReportedAgainFromItsExit() {
+        val state = File(tmp.root, "exit_info.json").apply { writeText("{\"lastTimestamp\":1}") }
+        val watchdog = File(tmp.root, "watchdog_anr.json").apply { writeText("{\"pid\":7}") }
+        val exits = listOf(exit(7, ExitRecord.REASON_ANR, 5_000), exit(8, ExitRecord.REASON_ANR, 6_000))
+        val previous = PreviousProcess.collect(
+            NativeCrashes(File(tmp.root, "native")), ExitReasons(state, "com.shop") { exits }, File(tmp.root, "scope.json"), watchdog,
+        )
+        val reported = ArrayList<PreviousProcess.Crash>()
+        previous.report("com.shop", inApp) { reported.add(it) }
+        assertEquals(1, reported.size)
+        assertTrue("both handled", ExitReasons(state, "com.shop") { exits }.takeNew().isEmpty())
+    }
+
+    @Test
+    fun longThreadListsAreCutToFitTheServerLimit() {
+        val longPath = "/data/app/~~abcdefghijklmnop==/com.shop-qrstuvwxyz==/oat/arm64/base.odex"
+        fun frames(n: Int) = (0 until n).map { linkedMapOf<String, Any?>("function" to "f$it", "package" to longPath, "instructionAddr" to "0x7a0000$it") }
+        val threads = (0 until 150).map { i ->
+            linkedMapOf<String, Any?>("id" to i, "name" to "t$i", "crashed" to (i == 0), "stacktrace" to linkedMapOf("frames" to frames(300)))
+        }
+        val fit = ThreadDump.fit(threads)
+        assertTrue(fit.size <= ThreadDump.MAX_THREADS)
+        assertTrue(dev.bugcapsule.android.core.Json.stringify(fit).toByteArray().size <= ThreadDump.MAX_THREADS_BYTES)
+        val crashedFrames = J.list(J.obj(fit[0]["stacktrace"])!!["frames"])!!
+        assertEquals(ExceptionMapper.MAX_FRAMES, crashedFrames.size)
+        assertEquals("the newest frames stay", "f299", J.obj(crashedFrames.last())!!["function"])
+        assertEquals(ThreadDump.MAX_FRAMES_PER_THREAD, J.list(J.obj(fit[1]["stacktrace"])!!["frames"])!!.size)
     }
 
     @Test
@@ -69,11 +114,14 @@ class ExitReasonsTest {
         assertEquals(true, frames.single { it["function"] == "__epoll_pwait" }["native"])
 
         val threads = J.list(ev["threads"])!!.map { J.obj(it)!! }
-        assertEquals(listOf("main", "Signal Catcher", "OkHttp Dispatcher"), threads.map { it["name"] })
+        assertEquals(listOf("main", "Signal Catcher", "binder:12345_1", "OkHttp Dispatcher"), threads.map { it["name"] })
         assertEquals(true, threads[0]["crashed"])
         assertEquals(12345L, threads[0]["id"])
-        assertEquals(false, threads[2]["crashed"])
-        assertEquals("Blocked", threads[2]["state"])
+        assertEquals("not attached threads keep their sysTid", 12352L, threads[2]["id"])
+        assertEquals(false, threads[3]["crashed"])
+        assertEquals("Blocked", threads[3]["state"])
+        val catcher = J.list(J.obj(threads[1]["stacktrace"])!!["frames"])!!.map { J.obj(it)!! }
+        assertEquals("an (offset …) suffix is not the function", "Java_com_shop_Native_run", catcher.first()["function"])
     }
 
     @Test
@@ -103,11 +151,12 @@ class ExitReasonsTest {
         val frames = J.list(J.obj(value["stacktrace"])!!["frames"])!!.map { J.obj(it)!! }
         assertEquals("checkout_native", frames.last()["function"])
         assertEquals("0x7a00001234", frames.last()["instructionAddr"])
+        assertEquals("every frame names its exact image", "0x7a00000000", frames.last()["imageAddr"])
         assertEquals(true, frames.last()["inApp"])
         val threads = J.list(ev["threads"])!!.map { J.obj(it)!! }
         assertEquals(listOf(124, 123), threads.map { it["id"] })
         assertEquals(true, threads[0]["crashed"])
-        val image = J.obj(J.list(ev["debugImages"])!!.first())!!
+        val image = J.obj(J.list(ev["debugImages"])!!.single())!! // libc is a system library: no image
         assertEquals("elf", image["type"])
         assertEquals("/data/app/~~x/com.shop-1/lib/arm64/libshop.so", image["codeFile"])
         assertEquals("0x7a00000000", image["imageAddr"])
@@ -221,6 +270,7 @@ class ExitReasonsTest {
             "Signal Catcher" daemon prio=10 tid=6 Runnable
               | sysTid=12351 nice=-20 cgrp=top-app
               native: #00 pc 000000000004cbd8  /apex/com.android.art/lib64/libart.so (art::DumpNativeStack+108)
+              native: #01 pc 0000000000001000  /data/app/~~x/com.shop-1/base.apk (offset 0x9000) (Java_com_shop_Native_run+12)
 
             "binder:12345_1" prio=5 (not attached)
               | sysTid=12352 nice=0 cgrp=top-app

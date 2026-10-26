@@ -210,12 +210,18 @@ JVM crashes (`REASON_CRASH`) are not repeated: the uncaught handler reported
 them. These processes could not write anything when they died, so monitoring
 also keeps the scope in `monitoring/scope.json` (at most every second, with
 the process id); an exit record of that pid gets that scope, release and
-environment, any other gets none. A native crash exit makes the recovered
+environment, any other gets none. Only the app's main process reads exit
+records and keeps that file. An ANR the watchdog already reported for a
+process is not reported again from its exit record. An exit is marked handled
+only once its event is queued, so a launch that dies first reports it again
+next time; on a fresh install the first ANR or crash counts too. Thread lists
+from tombstones and ANR dumps keep the frames nearest the top of each stack
+(250 for the crashed thread, 40 for the others, 1,500 in all) and drop the last
+threads until they fit 448 KiB, below the server's 512 KiB limit. A native crash exit makes the recovered
 session `crashed`; ANR and low-memory kills leave it `abnormal`.
 
 JVM crashes and watchdog ANRs list every thread (`threads`): the failing one
-first, then the main thread, then the others by id; at most 100 threads, 40
-frames each, 1,500 frames in all.
+first, then the main thread, then the others by id, within the same limits.
 
 ### Embedding (`CrashBridge`)
 
@@ -233,8 +239,10 @@ when `BugCapsule.init` already runs monitoring in the process.
 For every variant, `uploadBugCapsuleNativeSymbols<Variant>` uploads the
 output of `merge<Variant>NativeLibs` (unstripped, before the strip task): each
 `.so` with a GNU build id and a `.symtab` or `.debug_info` section, once per
-build id, as `kind=elf` with `arch` and `name`. It runs after `assemble` /
-`bundle` when a URL and key are set (`uploadNativeSymbols(false)` turns it off).
+build id, as `kind=elf` with `arch` and `name`. For non-debuggable variants it
+runs after `assemble` / `bundle` when a URL and key are set
+(`uploadNativeSymbols(false)` turns it off); debuggable ones upload only when
+the task is run by hand.
 
 For every variant with `isMinifyEnabled = true`, the
 `io.github.bugcapsule.gradle` plugin writes

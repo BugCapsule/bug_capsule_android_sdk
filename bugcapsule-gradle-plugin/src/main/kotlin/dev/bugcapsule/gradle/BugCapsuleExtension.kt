@@ -27,8 +27,9 @@ abstract class BugCapsuleExtension {
 
     /**
      * Upload the unstripped native libraries (`.so` with a build id and symbols) of each
-     * variant after `assemble<Variant>`/`bundle<Variant>` when url and key are set, so
-     * native crashes are symbolicated. Default true; variants without native code skip it.
+     * non-debuggable variant after `assemble<Variant>`/`bundle<Variant>` when url and key
+     * are set, so native crashes are symbolicated. Default true; variants without native
+     * code skip it, debuggable ones only upload with `uploadBugCapsuleNativeSymbols<Variant>`.
      */
     abstract val uploadNativeSymbols: Property<Boolean>
 

@@ -472,7 +472,8 @@ app. Without a URL or key the id is still embedded and the upload is skipped;
 
 The plugin also uploads the unstripped native libraries (`.so` files with a
 build id and symbols, your own and those of your dependencies) of every
-variant, so native crash frames resolve to functions and lines.
+release (non-debuggable) variant, so native crash frames resolve to functions
+and lines.
 `uploadNativeSymbols.set(false)` turns it off;
 `./gradlew uploadBugCapsuleNativeSymbols<Variant>` uploads by hand. More in
 [Release symbols](https://docs.bugcapsule.com/symbols.html).

@@ -16,6 +16,7 @@ import dev.bugcapsule.android.monitoring.InAppRules
 import dev.bugcapsule.android.monitoring.Monitoring
 import dev.bugcapsule.android.monitoring.NativeCrashes
 import dev.bugcapsule.android.monitoring.PreviousProcess
+import dev.bugcapsule.android.monitoring.ThreadDump
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -67,6 +68,8 @@ object CrashBridge {
         val nativeInstalled: Boolean,
         val executor: ScheduledExecutorService,
         val lastRunCrashed: Boolean,
+        /** Only the main process persists the scope (other processes would overwrite it). */
+        val mainProcess: Boolean,
     ) {
         @Volatile
         var scope: Map<String, Any?> = emptyMap()
@@ -106,18 +109,19 @@ object CrashBridge {
             val app = context.applicationContext ?: context
             val dir = File(app.noBackupFilesDir, "bugcapsule-crash-bridge").apply { mkdirs() }
             val native = NativeCrashes(File(dir, "native"))
-            val exits = if (options.exitInfo) {
+            val mainProcess = PreviousProcess.isMainProcess(app)
+            val exits = if (options.exitInfo && mainProcess) {
                 ExitReasons(File(dir, "exit_info.json"), app.packageName, PreviousProcess.systemExits(app))
             } else {
                 null
             }
-            val previous = PreviousProcess.collect(native, exits, File(dir, "scope.json"))
+            val previous = PreviousProcess.collect(native, exits, File(dir, "scope.json"), File(dir, "watchdog_anr.json"))
             val executor = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "BugCapsule-CrashBridge").apply { isDaemon = true } }
             val installed = options.nativeCrashes && native.install(release, environment)
             val s = State(
                 dir, release, environment, app.packageName,
                 InAppRules(options.inAppIncludes.ifEmpty { listOf(app.packageName) }, emptyList()),
-                native, installed, executor, lastRunCrashed = previous.crashedAtMs != null,
+                native, installed, executor, lastRunCrashed = previous.crashedAtMs != null, mainProcess = mainProcess,
             )
             state = s
             if (!previous.isEmpty) {
@@ -169,7 +173,7 @@ object CrashBridge {
         }
         s.scope = withProcess
         if (s.nativeInstalled) s.native.setScope(Json.stringify(withProcess).toByteArray(Charsets.UTF_8))
-        if (!s.scopeFileScheduled) {
+        if (s.mainProcess && !s.scopeFileScheduled) {
             s.scopeFileScheduled = true
             s.executor.schedule({
                 s.scopeFileScheduled = false
@@ -224,6 +228,7 @@ object CrashBridge {
             mainThread = main.thread,
             isForeground = { isForeground(context) },
             onAnr = { stack, blocked ->
+                if (s.mainProcess) PreviousProcess.noteWatchdogAnr(File(s.dir, "watchdog_anr.json"))
                 val ev = event(s, "error", null, s.release, s.environment, s.scope) { e ->
                     AnrWatchdog.fill(e, stack, blocked, timeoutMs, main.thread, s.inApp)
                 }
@@ -267,6 +272,7 @@ object CrashBridge {
             "environment" to environment,
         )
         fill(ev)
+        J.list(ev["threads"])?.let { list -> ev["threads"] = ThreadDump.fit(list.mapNotNull { J.obj(it) }) }
         Monitoring.applyPreviousScope(ev, scope)
         ev["level"] = level
         return ev

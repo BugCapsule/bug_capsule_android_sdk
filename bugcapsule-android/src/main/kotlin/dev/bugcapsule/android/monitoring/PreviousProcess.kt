@@ -15,7 +15,11 @@ import java.io.File
 internal class PreviousProcess private constructor(
     private val native: NativeCrashes,
     private val records: List<Pair<File, NativeCrashRecord?>>,
+    private val exitReasons: ExitReasons?,
+    /** New exit records worth an event, oldest first. */
     private val exits: List<ExitRecord>,
+    /** Newest of all new exit records (reportable or not): handled once [report] is done. */
+    private val newestExitMs: Long?,
     private val scope: Map<String, Any?>?,
     /** Release / environment the records were written with (read before the handler is reinstalled). */
     private val ctx: Map<String, Any?>,
@@ -83,7 +87,10 @@ internal class PreviousProcess private constructor(
             native.delete(file)
         }
         for (exit in exits) {
-            if (exit in used) continue
+            if (exit in used) {
+                exitReasons?.markHandled(exit.timestampMs)
+                continue
+            }
             try {
                 val s = scopeOf(exit.pid) ?: emptyMap()
                 val mechanism = when (exit.reason) {
@@ -103,7 +110,10 @@ internal class PreviousProcess private constructor(
             } catch (e: Throwable) {
                 SdkLog.w("could not report exit record of pid ${exit.pid}: $e")
             }
+            // Only now: a process that dies before this point reports the exit next time.
+            exitReasons?.markHandled(exit.timestampMs)
         }
+        newestExitMs?.let { exitReasons?.markHandled(it) }
     }
 
     companion object {
@@ -111,7 +121,7 @@ internal class PreviousProcess private constructor(
          * Call before [NativeCrashes.install] (it rewrites the records' context).
          * [exits]: null when exit records are not read (turned off).
          */
-        fun collect(native: NativeCrashes, exits: ExitReasons?, scopeFile: File): PreviousProcess {
+        fun collect(native: NativeCrashes, exits: ExitReasons?, scopeFile: File, watchdogAnrFile: File? = null): PreviousProcess {
             val records = native.pending().map { file ->
                 file to try {
                     NativeCrashRecord.parse(file.readText())
@@ -126,7 +136,45 @@ internal class PreviousProcess private constructor(
                 null
             }
             val ctx = if (records.isEmpty()) emptyMap() else native.previousContext()
-            return PreviousProcess(native, records, exits?.takeNew()?.filter(ExitReasons::reportable) ?: emptyList(), scope, ctx)
+            // The ANR watchdog already reported the hang of this process (an `error` event while it ran):
+            // the system's ANR exit for it would count the same hang twice.
+            val watchdogPid = try {
+                if (watchdogAnrFile?.exists() == true) J.int(J.obj(Json.parse(watchdogAnrFile.readText()))?.get("pid")) else null
+            } catch (_: Exception) {
+                null
+            }
+            val fresh = exits?.takeNew() ?: emptyList()
+            val reportable = fresh.filter { ExitReasons.reportable(it) && !(it.reason == ExitRecord.REASON_ANR && it.pid == watchdogPid) }
+            val newest = fresh.maxOfOrNull { it.timestampMs }
+            if (reportable.isEmpty() && newest != null) exits?.markHandled(newest)
+            return PreviousProcess(native, records, exits, reportable, newest, scope, ctx)
+        }
+
+        /** Remembers that the watchdog reported an ANR of this process (see [collect]). */
+        fun noteWatchdogAnr(file: File) {
+            try {
+                dev.bugcapsule.android.internal.Files.writeAtomically(
+                    file, Json.stringify(linkedMapOf("pid" to android.os.Process.myPid())).toByteArray(),
+                )
+            } catch (_: Exception) {
+            }
+        }
+
+        /**
+         * True in the app's main process. Exit records and the persisted scope
+         * belong to it: other processes of the app must not read or overwrite them.
+         */
+        fun isMainProcess(context: Context): Boolean {
+            val name = try {
+                if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    android.app.Application.getProcessName()
+                } else {
+                    File("/proc/self/cmdline").readText().substringBefore('\u0000').trim()
+                }
+            } catch (_: Throwable) {
+                null
+            }
+            return name.isNullOrEmpty() || name == context.packageName
         }
 
         /** Tests: replaces the system's exit records everywhere they are read. */

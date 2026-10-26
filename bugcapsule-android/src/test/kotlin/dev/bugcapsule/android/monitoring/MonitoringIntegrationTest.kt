@@ -401,7 +401,7 @@ class MonitoringIntegrationTest {
         val value = J.obj(J.list(J.obj(event["exception"])!!["values"])!!.single())!!
         assertEquals("ApplicationNotResponding", value["type"])
         assertEquals("Input dispatching timed out", value["value"])
-        assertEquals(3, J.list(event["threads"])!!.size)
+        assertEquals(4, J.list(event["threads"])!!.size)
         // Seen once: the next start does not report it again.
         assertTrue(java.io.File(tmp.root, "monitoring/exit_info.json").readText().contains("1761000005000"))
     }

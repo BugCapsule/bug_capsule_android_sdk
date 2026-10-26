@@ -60,20 +60,35 @@ internal class ExitReasons(
         } catch (_: Throwable) {
             emptyList()
         }.filter { it.processName == null || it.processName == processName }
-        val seen = try {
-            if (stateFile.exists()) J.long(J.obj(Json.parse(stateFile.readText()))?.get("lastTimestamp")) else null
-        } catch (_: Exception) {
-            null
+        val seen = readSeen()
+        if (seen == null) {
+            // First launch with this feature: older exits are history, later ones (from 0 on a fresh install) count.
+            write(all.maxOfOrNull { it.timestampMs } ?: 0L)
+            return emptyList()
         }
-        val newest = all.maxOfOrNull { it.timestampMs }
-        if (newest != null && (seen == null || newest > seen)) {
-            try {
-                Files.writeAtomically(stateFile, Json.stringify(linkedMapOf("lastTimestamp" to newest)).toByteArray())
-            } catch (_: Exception) {
-            }
-        }
-        if (seen == null) return emptyList()
         return all.filter { it.timestampMs > seen }.sortedBy { it.timestampMs }
+    }
+
+    /**
+     * Exits up to [timestampMs] are handled: call once their events are
+     * queued, so a process that dies before that reports them next time.
+     */
+    fun markHandled(timestampMs: Long) {
+        val seen = readSeen() ?: 0L
+        if (timestampMs > seen) write(timestampMs)
+    }
+
+    private fun readSeen(): Long? = try {
+        if (stateFile.exists()) J.long(J.obj(Json.parse(stateFile.readText()))?.get("lastTimestamp")) else null
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun write(timestampMs: Long) {
+        try {
+            Files.writeAtomically(stateFile, Json.stringify(linkedMapOf("lastTimestamp" to timestampMs)).toByteArray())
+        } catch (_: Exception) {
+        }
     }
 
     companion object {
@@ -152,7 +167,7 @@ internal class ExitReasons(
                 ),
             )
             ev["threads"] = tombstone.threadsJson(appId, crashedTid = crashing?.id)
-            ev["debugImages"] = tombstone.debugImages()
+            ev["debugImages"] = tombstone.debugImages(appId)
         }
 
         /**
@@ -166,7 +181,7 @@ internal class ExitReasons(
             val others = tombstone.threadsJson(appId, crashedTid = null).filter { (it["id"] as? Number)?.toInt() != crashedTid }
             ev["threads"] = (own + others).take(ThreadDump.MAX_THREADS)
             val images = LinkedHashMap<String, Map<String, Any?>>()
-            for (i in (J.list(ev["debugImages"]) ?: emptyList()).mapNotNull { J.obj(it) } + tombstone.debugImages()) {
+            for (i in (J.list(ev["debugImages"]) ?: emptyList()).mapNotNull { J.obj(it) } + tombstone.debugImages(appId)) {
                 // One image per library; ours first (its address is where this process loaded it).
                 images.putIfAbsent((i["codeFile"] ?: i["debugId"]).toString(), i)
             }
@@ -181,9 +196,11 @@ internal class ExitReasons(
  */
 internal object AnrTrace {
     private val header = Regex("^\"(.*)\"(?: daemon)? prio=\\d+ tid=(\\d+) (\\S+).*")
+    /** A native thread the runtime does not manage. */
+    private val detachedHeader = Regex("^\"(.*)\"(?: daemon)? prio=\\d+ \\(not attached\\).*")
     private val sysTid = Regex("sysTid=(\\d+)")
     private val javaFrame = Regex("^\\s+at (.+)\\.([^.(]+)\\((.*)\\)\\s*$")
-    private val nativeFrame = Regex("^\\s+native: #\\d+ pc ([0-9a-fA-F]+)\\s+(\\S+)(?: \\((.+?)\\))?(?: \\(BuildId: [0-9a-fA-F]+\\))?\\s*$")
+    private val nativeFrame = Regex("^\\s+native: #\\d+ pc ([0-9a-fA-F]+)\\s+(\\S+)(?: \\(offset 0x[0-9a-fA-F]+\\))?(?: \\((.+?)\\))?(?: \\(BuildId: [0-9a-fA-F]+\\))?\\s*$")
 
     fun parse(text: String, inApp: InAppRules): List<Map<String, Any?>> {
         val out = ArrayList<Map<String, Any?>>()
@@ -211,6 +228,14 @@ internal object AnrTrace {
                 name = h.groupValues[1]
                 id = h.groupValues[2].toLongOrNull()
                 state = h.groupValues[3]
+                continue
+            }
+            val d = detachedHeader.matchEntire(line)
+            if (d != null) {
+                flush()
+                name = d.groupValues[1]
+                id = null
+                state = "Native"
                 continue
             }
             if (name == null) continue
@@ -261,7 +286,8 @@ internal class Tombstone(
                 if (!f.fileName.isNullOrEmpty()) {
                     it["package"] = f.fileName
                     it["inApp"] = NativeCrashes.isAppLibrary(f.fileName, appId)
-                    if (f.buildId.isNullOrEmpty()) it["imageAddr"] = hex(f.pc - f.relPc)
+                    // Exact image of the frame (the server matches it to the debug image by this address).
+                    it["imageAddr"] = hex(f.pc - f.relPc)
                 } else {
                     it["inApp"] = false
                 }
@@ -282,11 +308,16 @@ internal class Tombstone(
         }
     }
 
-    /** One `elf` image per library with a build id; its address is where the frames say it was loaded. */
-    fun debugImages(): List<Map<String, Any?>> {
+    /**
+     * One `elf` image per app library with a build id; its address is where
+     * the frames say it was loaded. System libraries are left out: nobody
+     * uploads their symbols, and their frames already have function names.
+     */
+    fun debugImages(appId: String): List<Map<String, Any?>> {
         val images = LinkedHashMap<String, Map<String, Any?>>()
         for (t in threads) for (f in t.backtrace) {
             val file = f.fileName ?: continue
+            if (!NativeCrashes.isAppLibrary(file, appId)) continue
             val buildId = f.buildId?.takeIf { it.length >= 2 } ?: continue
             if (file in images) continue
             val bytes = try {

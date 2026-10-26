@@ -80,7 +80,7 @@ class CrashBridgeTest {
         assertEquals("qa", event["environment"])
         assertEquals("u_anr", J.obj(event["user"])!!["id"])
         assertEquals("ApplicationNotResponding", J.obj(J.list(J.obj(event["exception"])!!["values"])!!.single())!!["type"])
-        assertEquals(3, J.list(event["threads"])!!.size)
+        assertEquals(4, J.list(event["threads"])!!.size)
     }
 
     @Test

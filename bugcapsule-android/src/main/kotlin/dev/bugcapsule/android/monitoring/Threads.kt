@@ -1,5 +1,8 @@
 package dev.bugcapsule.android.monitoring
 
+import dev.bugcapsule.android.core.J
+import dev.bugcapsule.android.core.Json
+
 /**
  * `threads` of an event (monitoring-v1 §2): every live JVM thread's stack
  * when the app crashes or hangs, so deadlocks and work blocking the main
@@ -9,6 +12,35 @@ internal object ThreadDump {
     const val MAX_THREADS = 100
     const val MAX_FRAMES_PER_THREAD = 40
     const val MAX_TOTAL_FRAMES = 1_500
+
+    /** The server rejects the whole event above 512 KiB of `threads`: stay well below. */
+    const val MAX_THREADS_BYTES = 448 * 1024
+
+    /**
+     * Keeps any thread list (ours, a tombstone's, an ANR dump's) within the
+     * server's limits: [MAX_THREADS], frames closest to the top of each stack
+     * ([ExceptionMapper.MAX_FRAMES] for the crashed thread,
+     * [MAX_FRAMES_PER_THREAD] for the others, [MAX_TOTAL_FRAMES] in all), then
+     * the last threads go until the JSON fits [MAX_THREADS_BYTES].
+     */
+    fun fit(threads: List<Map<String, Any?>>): List<Map<String, Any?>> {
+        var budget = MAX_TOTAL_FRAMES
+        val out = ArrayList<Map<String, Any?>>()
+        for (t in threads.take(MAX_THREADS)) {
+            val frames = J.list(J.obj(t["stacktrace"])?.get("frames"))
+            if (frames == null) {
+                out.add(t)
+                continue
+            }
+            val cap = if (t["crashed"] == true) ExceptionMapper.MAX_FRAMES else MAX_FRAMES_PER_THREAD
+            val keep = minOf(frames.size, cap, budget.coerceAtLeast(0))
+            budget -= keep
+            // Frames are oldest first: keep the newest.
+            out.add(LinkedHashMap(t).also { it["stacktrace"] = linkedMapOf("frames" to frames.takeLast(keep)) })
+        }
+        while (out.size > 1 && Json.stringify(out).toByteArray(Charsets.UTF_8).size > MAX_THREADS_BYTES) out.removeAt(out.size - 1)
+        return out
+    }
 
     /**
      * [crashed]: the thread the failure happened on, listed first (with

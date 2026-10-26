@@ -470,14 +470,16 @@ internal class Runtime(
         // What the previous process left behind: native crash records, the
         // system's exit records, its scope, an unfinished session.
         val native = NativeCrashes(File(s.root, "native"))
-        val readExits = PreviousProcess.exitInfoOverride != null || (threads && config.enableExitInfoTracking)
+        val mainProcess = PreviousProcess.isMainProcess(host.context)
+        val readExits = mainProcess && (PreviousProcess.exitInfoOverride != null || (threads && config.enableExitInfoTracking))
         val exits = if (readExits) {
             ExitReasons(File(monitoringEnv.dir, "exit_info.json"), host.application.packageName, PreviousProcess.systemExits(host.context))
         } else {
             null
         }
         val scopeFile = File(monitoringEnv.dir, "scope.json")
-        val previous = PreviousProcess.collect(native, exits, scopeFile)
+        val watchdogAnrFile = File(monitoringEnv.dir, "watchdog_anr.json")
+        val previous = PreviousProcess.collect(native, exits, scopeFile, watchdogAnrFile)
         mon.sessions?.recoverPrevious(previous.crashedAtMs)
         if (!previous.isEmpty) {
             // Tombstones and ANR dumps can be large: read them off the calling thread.
@@ -496,7 +498,7 @@ internal class Runtime(
             }
         }
         val nativeInstalled = threads && config.enableNativeCrashHandling && native.install(mon.release, mon.environment)
-        mon.mirrorScope(if (nativeInstalled) { json -> native.setScope(json) } else null, scopeFile)
+        mon.mirrorScope(if (nativeInstalled) { json -> native.setScope(json) } else null, if (mainProcess) scopeFile else null)
 
         if (threads && config.enableAnrTracking) {
             anrWatchdog = AnrWatchdog(
@@ -505,6 +507,7 @@ internal class Runtime(
                 mainThread = android.os.Looper.getMainLooper().thread,
                 isForeground = { foreground },
                 onAnr = { stack, blocked ->
+                    if (mainProcess) PreviousProcess.noteWatchdogAnr(watchdogAnrFile)
                     mon.captureRaw(Level.ERROR, Hint(null, "anr", null), fatal = false) { ev ->
                         AnrWatchdog.fill(ev, stack, blocked, config.anrTimeoutMs, android.os.Looper.getMainLooper().thread, mon.inApp)
                     }

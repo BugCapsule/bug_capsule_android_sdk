@@ -286,6 +286,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
             ev["extra"] = snap.extras + (options?.extra ?: emptyMap())
             ev["capsuleId"] = capsuleId
             if (previousScope != null) applyPreviousScope(ev, previousScope)
+            J.list(ev["threads"])?.let { list -> ev["threads"] = ThreadDump.fit(list.mapNotNull { J.obj(it) }) }
             if (fatal) ev["level"] = Level.FATAL.wire
 
             // Release health counts every error, sampled or not.
@@ -364,6 +365,9 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
     private var mirrorScheduled = false
 
     @Volatile
+    private var fileWriteScheduled = false
+
+    @Volatile
     private var lastScopeFileWriteMs = 0L
 
     /**
@@ -403,11 +407,12 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
                 if (force || now - lastScopeFileWriteMs >= SCOPE_FILE_INTERVAL_MS) {
                     lastScopeFileWriteMs = now
                     dev.bugcapsule.android.internal.Files.writeAtomically(file, json)
-                } else if (!mirrorScheduled) {
+                } else if (!fileWriteScheduled) {
                     // Changed within the interval: one trailing write keeps the file current.
-                    mirrorScheduled = true
+                    // Its own flag: the native buffer keeps getting every change meanwhile.
+                    fileWriteScheduled = true
                     env.schedule(SCOPE_FILE_INTERVAL_MS - (now - lastScopeFileWriteMs)) {
-                        mirrorScheduled = false
+                        fileWriteScheduled = false
                         mirrorScopeNow()
                     }
                 }

@@ -299,7 +299,8 @@ internal class NativeCrashes(private val dir: File) {
                         buildIds(f.image)?.let { image["debugId"] = it }
                         images[f.image] = image
                     }
-                    if (images[f.image]?.get("debugId") == null && f.imageBase != 0L) frame["imageAddr"] = hex(f.imageBase)
+                    // Exact image of the frame: without it the server picks the first image starting below the address.
+                    if (f.imageBase != 0L) frame["imageAddr"] = hex(f.imageBase)
                 } else {
                     frame["inApp"] = false
                 }
