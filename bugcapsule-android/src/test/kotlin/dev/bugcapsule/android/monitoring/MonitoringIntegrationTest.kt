@@ -342,12 +342,15 @@ class MonitoringIntegrationTest {
         java.io.File(root, "context.json").writeText("{\"release\":\"com.shop@0.9.0+8\",\"environment\":\"qa\"}")
         java.io.File(root, "123-1761000000000.crash").writeText(
             "bugcapsule-native-crash 1\nsignal 6\ncode -6\naddress 0x0\ntid 77\nthread main\ntimestamp 1761000000500\nabi arm64-v8a\n" +
+                "scope {\"tags\":{\"screen\":\"checkout\"},\"user\":{\"id\":\"u_crashed\"},\"extra\":{},\"contexts\":{\"app\":{\"appVersion\":\"0.9.0\"}}," +
+                "\"breadcrumbs\":[{\"timestamp\":\"2025-10-20T22:39:59.000Z\",\"type\":\"navigation\",\"category\":\"navigation\",\"message\":null,\"level\":\"info\",\"data\":{\"to\":\"/pay\"}}]}\n" +
                 "frame 0x7a00001000 0x7a00000000 0x7a00000f00 /data/app/x/lib/arm64/libshop.so checkout_native\nend\n",
         )
         java.io.File(tmp.root, "monitoring").mkdirs()
         java.io.File(tmp.root, "monitoring/session.json").writeText(
             "{\"sid\":\"b3a1c0de-0000-4000-8000-000000000000\",\"did\":\"i\",\"started\":1761000000000,\"seq\":0," +
-                "\"status\":\"ok\",\"errors\":0,\"timestamp\":1761000000100,\"backgroundSince\":null}",
+                "\"status\":\"ok\",\"errors\":0,\"timestamp\":1761000000100,\"backgroundSince\":null," +
+                "\"release\":\"com.shop@0.9.0+8\",\"environment\":\"qa\"}",
         )
         start()
         flushAll()
@@ -358,10 +361,47 @@ class MonitoringIntegrationTest {
         val value = J.obj(J.list(J.obj(event["exception"])!!["values"])!![0])!!
         assertEquals("SIGABRT", value["type"])
         assertEquals("signal", J.obj(value["mechanism"])!!["type"])
+        // The crashed process's scope, not this launch's.
+        assertEquals("u_crashed", J.obj(event["user"])!!["id"])
+        assertEquals("checkout", J.obj(event["tags"])!!["screen"])
+        assertEquals("/pay", J.obj(J.obj(J.list(event["breadcrumbs"])!!.single())!!["data"])!!["to"])
+        val contexts = J.obj(event["contexts"])!!
+        assertEquals("0.9.0", J.obj(contexts["app"])!!["appVersion"])
+        assertNotNull("device contexts still come from this launch", contexts["os"])
         val session = items("session").single()
         assertEquals("b3a1c0de-0000-4000-8000-000000000000", session["sid"])
         assertEquals("crashed", session["status"])
+        assertEquals("com.shop@0.9.0+8", session["release"])
         assertFalse("records are consumed", java.io.File(root, "123-1761000000000.crash").exists())
+    }
+
+    @Test
+    fun theScopeIsMirroredAsOneLineOfRedactedJsonWithinTheNativeBuffer() {
+        start()
+        val mon = runtime().monitoring!!
+        val mirrored = Collections.synchronizedList(ArrayList<ByteArray>())
+        mon.mirrorScopeTo { mirrored.add(it) }
+        BugCapsule.setUser(User(id = "u_7"))
+        BugCapsule.setTag("screen", "checkout")
+        BugCapsule.addBreadcrumb(Breadcrumb("tapped pay", data = mapOf("password" to "hunter2")))
+        mon.mirrorScopeNow()
+        val json = J.obj(Json.parse(String(mirrored.last(), Charsets.UTF_8)))!!
+        assertFalse(String(mirrored.last()).contains('\n'))
+        assertEquals("u_7", J.obj(json["user"])!!["id"])
+        assertEquals("checkout", J.obj(json["tags"])!!["screen"])
+        val crumb = J.obj(J.list(json["breadcrumbs"])!!.last())!!
+        assertEquals("tapped pay", crumb["message"])
+        assertFalse("redacted before it reaches disk", String(mirrored.last()).contains("hunter2"))
+        assertNotNull(J.obj(J.obj(json["contexts"])!!["app"]))
+
+        // Over 64 KiB: the oldest breadcrumbs go, the newest stay.
+        repeat(100) { i -> BugCapsule.addBreadcrumb(Breadcrumb("crumb $i", data = mapOf("blob" to "x".repeat(2_000)))) }
+        mon.mirrorScopeNow()
+        val big = mirrored.last()
+        assertTrue(big.size <= Monitoring.CRASH_SCOPE_MAX_BYTES)
+        val crumbs = J.list(J.obj(Json.parse(String(big, Charsets.UTF_8)))!!["breadcrumbs"])!!
+        assertEquals("crumb 99", J.obj(crumbs.last())!!["message"])
+        assertTrue(crumbs.size < 100)
     }
 
     @Test

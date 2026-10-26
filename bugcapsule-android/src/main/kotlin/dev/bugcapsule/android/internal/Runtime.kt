@@ -482,6 +482,7 @@ internal class Runtime(
                         releaseOverride = ctx["release"] as? String,
                         environmentOverride = ctx["environment"] as? String,
                         countInSession = false,
+                        previousScope = record.scope,
                     ) { ev -> NativeCrashes.fill(ev, record, monitoringEnv.app.id, ElfBuildId::forPath) }
                 }
             } catch (e: Throwable) {
@@ -490,7 +491,9 @@ internal class Runtime(
             native.delete(file)
         }
         mon.sessions?.recoverPrevious(crashedAt)
-        if (threads && config.enableNativeCrashHandling) native.install(mon.release, mon.environment)
+        if (threads && config.enableNativeCrashHandling && native.install(mon.release, mon.environment)) {
+            mon.mirrorScopeTo { json -> native.setScope(json) }
+        }
 
         if (threads && config.enableAnrTracking) {
             anrWatchdog = AnrWatchdog(

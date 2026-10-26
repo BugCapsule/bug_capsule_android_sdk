@@ -44,6 +44,14 @@ static int run_case(const char *dir, int kind) {
     if (pid == 0) {
         if (!bc_ndk_install(path)) _exit(100);
         if (!bc_ndk_is_installed()) _exit(101);
+        {
+            static const char first[] = "{\"tags\":{\"old\":\"1\"}}";
+            static const char second[] = "{\"tags\":{\"screen\":\"checkout\"},\n\"user\":{\"id\":\"u_1\"}}";
+            static char big[64 * 1024 + 1];
+            if (!bc_ndk_set_scope(first, sizeof(first) - 1)) _exit(103);
+            if (!bc_ndk_set_scope(second, sizeof(second) - 1)) _exit(104);
+            if (bc_ndk_set_scope(big, sizeof(big))) _exit(105); /* over 64 KiB: refused, keeps the last one */
+        }
         if (kind == 0) smoke_null_write(); else bc_ndk_crash(1);
         _exit(102);
     }
@@ -87,6 +95,10 @@ static int run_case(const char *dir, int kind) {
         if (strncmp(line, "frame 0x", 8) == 0) frames++;
     }
     if (frames < 1) { fprintf(stderr, "no frame lines\n"); failures++; }
+    if (!has_line_prefix(text, "scope {\"tags\":{\"screen\":\"checkout\"}, \"user\":{\"id\":\"u_1\"}}\n")) {
+        fprintf(stderr, "missing or wrong scope line (latest scope, line break as space)\n");
+        failures++;
+    }
     if (kind == 0 && strstr(text, "smoke_null_write") == NULL && strstr(text, "main") == NULL) {
         fprintf(stderr, "warning: no recognizable symbol in frames (static functions are not in dladdr's view)\n");
     }

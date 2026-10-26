@@ -7,6 +7,8 @@
 #ifndef BUGCAPSULE_NDK_H
 #define BUGCAPSULE_NDK_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,6 +29,14 @@ void bc_ndk_uninstall(void);
 
 /* 1 when the handlers are installed. */
 int bc_ndk_is_installed(void);
+
+/*
+ * Sets the scope written into crash records (one line of JSON, at most 64 KiB;
+ * line breaks are written as spaces). Copied; thread safe; safe to call while
+ * the handlers are not installed. Returns 0 when too large or when a crash is
+ * being recorded.
+ */
+int bc_ndk_set_scope(const char *json, size_t len);
 
 /* Demo/testing only: 0 = SIGSEGV (null write), 1 = abort() (SIGABRT). */
 void bc_ndk_crash(int kind);

@@ -23,14 +23,16 @@ import java.util.zip.ZipFile
  * thread RenderThread
  * timestamp 1761000000000
  * abi arm64-v8a
+ * scope {"tags":{…},"user":{…},"breadcrumbs":[…],…}
  * frame 0x7a1b2c3d4e 0x7a1b200000 0x7a1b2c3d00 /data/app/…/lib/arm64/libshop.so crash_here
  * end
  * ```
  *
  * Frames are crashing frame first: its exact PC, then the callers' return
  * addresses as unwound (made `- 1` when sent, see [NativeCrashes.fill]);
- * `-` means unknown. A record without `end`
- * (the handler died while unwinding) is still used.
+ * `-` means unknown. `scope` is the crashed process's scope as mirrored by
+ * [Monitoring.mirrorScopeTo] (absent before the first mirror). A record
+ * without `end` (the handler died while unwinding) is still used.
  */
 internal class NativeCrashRecord(
     val signal: Int,
@@ -41,6 +43,7 @@ internal class NativeCrashRecord(
     val timestampMs: Long?,
     val abi: String?,
     val frames: List<Frame>,
+    val scope: Map<String, Any?>? = null,
 ) {
     class Frame(val pc: Long, val imageBase: Long, val symbolAddress: Long, val image: String?, val symbol: String?)
 
@@ -57,6 +60,7 @@ internal class NativeCrashRecord(
             var thread: String? = null
             var timestamp: Long? = null
             var abi: String? = null
+            var scope: Map<String, Any?>? = null
             val frames = ArrayList<Frame>()
             for (line in lines.drop(1)) {
                 val key = line.substringBefore(' ')
@@ -69,11 +73,16 @@ internal class NativeCrashRecord(
                     "thread" -> thread = rest.takeIf { it.isNotBlank() }
                     "timestamp" -> timestamp = rest.trim().toLongOrNull()
                     "abi" -> abi = rest.trim().takeIf { it.isNotEmpty() }
+                    "scope" -> scope = try {
+                        J.obj(Json.parse(rest))
+                    } catch (_: Exception) {
+                        null
+                    }
                     "frame" -> parseFrame(rest)?.let { frames.add(it) }
                     "end" -> break
                 }
             }
-            return NativeCrashRecord(signal ?: return null, code, address, tid, thread, timestamp, abi, frames)
+            return NativeCrashRecord(signal ?: return null, code, address, tid, thread, timestamp, abi, frames, scope)
         }
 
         private fun parseFrame(rest: String): Frame? {
@@ -253,6 +262,21 @@ internal class NativeCrashes(private val dir: File) {
     }
 
     fun delete(file: File) = Files.deleteQuietly(file)
+
+    private val setScopeMethod: java.lang.reflect.Method? by lazy {
+        try {
+            Class.forName("dev.bugcapsule.ndk.BugCapsuleNdk").getMethod("setScope", ByteArray::class.java)
+        } catch (_: Throwable) {
+            null // bugcapsule-ndk older than the scope mirror
+        }
+    }
+
+    /** Hands the scope JSON to the installed handler; false without one. */
+    fun setScope(json: ByteArray): Boolean = try {
+        setScopeMethod?.invoke(null, json) as? Boolean ?: false
+    } catch (_: Throwable) {
+        false
+    }
 
     companion object {
         /**

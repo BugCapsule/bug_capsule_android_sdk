@@ -12,7 +12,8 @@ import java.io.File
  * system crash reporting still runs. The core SDK reads, reports and deletes
  * those files on the next launch.
  *
- * The core SDK calls this object by reflection only; keep the signatures stable.
+ * The core SDK calls this object by reflection only; keep the signatures stable
+ * (`install(String)`, `setScope(byte[])`, `isInstalled`).
  */
 object BugCapsuleNdk {
     private const val LIBRARY = "bugcapsule-ndk"
@@ -64,6 +65,22 @@ object BugCapsuleNdk {
         get() = installed
 
     /**
+     * Sets the scope (one line of JSON, at most 64 KiB) written into the next
+     * crash record, so the event built on the next launch has the crashed
+     * process's breadcrumbs, user and tags. False when not installed, too
+     * large, or a crash is being recorded. Never throws.
+     */
+    @JvmStatic
+    fun setScope(json: ByteArray): Boolean {
+        if (!installed) return false
+        return try {
+            nativeSetScope(json)
+        } catch (t: Throwable) {
+            false
+        }
+    }
+
+    /**
      * Demo/testing only: 0 = SIGSEGV (null write), 1 = abort() (SIGABRT).
      * Does nothing when the native library is not available.
      */
@@ -96,6 +113,9 @@ object BugCapsuleNdk {
 
     @JvmStatic
     private external fun nativeUninstall()
+
+    @JvmStatic
+    private external fun nativeSetScope(json: ByteArray): Boolean
 
     @JvmStatic
     private external fun nativeCrash(kind: Int)
