@@ -225,4 +225,43 @@ class ReplayEngineTest {
         assertTrue(now >= 1_760_000_000_000 && now < 1_760_000_000_000 + 5000)
         assertNull(e.buildReport().observed)
     }
+
+    @Test
+    fun dueInteractionDeliveriesHoldIdleCompressionAndUnusedOnesAreReported() {
+        fun ws(seq: Long, t: Long, type: String, data: Map<String, Any?>) = CapsuleEvent(seq, t, type, mapOf("dep" to "ws") + data)
+        val events = listOf(
+            pointer(1, 100, "down"), pointer(2, 120, "up"),
+            ws(3, 100, "ws.connect", mapOf("conn" to "ws1", "key" to "K", "occurrence" to 0L)),
+            ws(4, 200, "ws.connect", mapOf("conn" to "ws2", "key" to "K2", "occurrence" to 0L)),
+            ws(5, 1000, "ws.message", mapOf("conn" to "ws1", "index" to 0L)),
+            pointer(6, 1200, "down"), pointer(7, 1210, "up"),
+            pointer(8, 6000, "down"), pointer(9, 6010, "up"),
+            ws(10, 7000, "ws.send", mapOf("conn" to "ws1", "index" to 0L)),
+        ).sortedBy { it.seq }
+        val base = TestCapsules.capsule(events, TestCapsules.failure(t = 3000))
+        val dep = dev.bugcapsule.android.core.CapsuleDependency(
+            "ws", "websocket", "test.ws", "1", 1, true, dev.bugcapsule.android.core.DependencyCoverage.COMPLETE,
+        )
+        val capsule = base.copy(manifest = base.manifest.copy(dependencies = listOf(dep)))
+        val e = ReplayEngine(capsule, ReplaySettings(settleTimeoutMs = 50), actions, null, { reports.add(it) })
+        var deliveredAt: Long? = null
+        val driver = FakeDriver()
+        var downs = 0
+        driver.onPointer = { phase ->
+            // The app connects late (at 1200 instead of 100): the message is due 900 ms after that.
+            if (phase == "down" && ++downs == 2) {
+                assertEquals("ws1", e.interactions.take("ws", "ws.connect", "K")!!.data["conn"])
+                e.interactions.bind("ws:ws1") { deliveredAt = e.elapsed() }
+            }
+        }
+        val r = e.run(driver)
+        val at = deliveredAt!!
+        assertTrue("delivered at $at, not skipped past", at in 1900..3500)
+        assertEquals(1, r.gapsCompressed)
+        assertTrue(r.compressedMs > 1500)
+        val types = r.divergences.map { it.type }
+        assertTrue(types.toString(), "ws.unused" in types) // ws2 never connected (recorded before the failure)
+        assertTrue(types.toString(), "ws.unusedAfterFailure" in types) // the send at 7000
+        assertTrue(r.divergences.single { it.type == "ws.unused" }.detail.startsWith("ws:ws2: ws.connect"))
+    }
 }

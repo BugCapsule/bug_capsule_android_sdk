@@ -11,6 +11,7 @@ and the full list of limitations. The capsule format is documented at
 - [Failure-capture boundaries](#failure-capture-boundaries)
 - [Monitoring](#monitoring)
 - [Replay](#replay)
+- [Interaction dependencies](#interaction-dependencies)
 - [`bugcapsule.json`](#bugcapsulejson)
 - [Storage and uploads](#storage-and-uploads)
 - [Demo app](#demo-app)
@@ -37,6 +38,9 @@ coroutine exceptions reach the default handler).
 - **Network**: OkHttp exchanges; the response body source is tapped while the
   app reads it (same bytes and timing), keeping a bounded prefix (256 KiB text,
   64 KiB binary); one-shot/duplex request bodies are never read.
+- **WebSockets** (`BugCapsuleWebSockets`, `bugcapsule-okhttp`) and **native
+  SDK adapters** (`NativeAdapter`): see
+  [Interaction dependencies](#interaction-dependencies).
 - **Storage**: allowlisted SharedPreferences files/keys and DataStore stores
   in every checkpoint (launch, then every 30 s).
 - **Failures**: `check`/`fail` assertions, `reportError`, and uncaught JVM
@@ -238,6 +242,78 @@ boot; an emulator the CLI booted is shut down afterwards. The device must be
 unlocked once after boot (AVDs with a screen-lock PIN cannot be unlocked by
 the CLI).
 
+## Interaction dependencies
+
+WebSockets and third-party SDKs are recorded as *interaction dependencies*
+(capsule format v2, [docs.bugcapsule.com/capsule-format](https://docs.bugcapsule.com/capsule-format.html)).
+A capsule is written as v2 only when it contains at least one; sessions
+without them stay v1. The SDK reads v1 and v2 and rejects newer versions.
+
+Each adapter adds one `manifest.dependencies` entry: adapter id and version,
+payload schema, recorded operations, the library versions it was tested
+against, gaps (why coverage is `partial`) and counters. A dependency with
+gaps also gets a `dependency.<id>` eligibility entry.
+
+**Bounds** (shared by every adapter of a session): 64 KiB per payload
+(larger ones are recorded as `truncated`), 1 MiB of payloads in a rolling
+5-minute window (later ones keep only their size), 32 connections and
+subscriptions open at once (further ones run uncaptured with a
+`connections.limit` gap). Payloads go through the session's redactor; a
+redacted payload is not served in replay unless the adapter declares it
+safe. Binary data is recorded as size only unless the adapter opts in. With
+network body capture off, payloads are recorded as `omitted`. The project's
+capture settings can turn off one adapter by id; its buffered events are
+dropped and HTTP capture continues.
+
+**OkHttp WebSockets** (`bugcapsule-okhttp.websocket`, schema 1, tested with
+OkHttp 4.12.0). Only sockets created with `BugCapsuleWebSockets.factory(client)`
+or `newWebSocket(client, request, listener)` are captured. Recorded:
+`ws.connect` (connection id, redacted URL, match key = redacted URL without
+ignored query parameters, occurrence, reconnect attempt = consecutive failed
+connects for that key, requested protocols), `ws.open`, `ws.send` (with the
+`Boolean` OkHttp returned), `ws.message`, `ws.error` (`connect` or `stream`
+phase, HTTP status of a failed handshake), the app's `close`/`cancel`
+(`ws.close`, `initiator: client`), and the listener's `onClosing`/`onClosed`
+(`ws.close` with `callback: closing|closed`).
+
+In replay the adapter never connects. A connect is matched by key and
+occurrence (identical concurrent connections by invocation order); sends and
+closes are compared in order and return the recorded result; recorded
+callbacks follow the app's own operations at the recorded latency. Listener
+callbacks run on one background thread, `BugCapsule-WebSocket`, one at a
+time in recorded order across all sockets (never on the main thread).
+
+**Native adapters** implement `NativeAdapter` and go through
+`NativeInteractions.call` (`native.call` / `result` / `error`) and
+`subscribe` (`native.subscribe` / `event` / `error` / `done` / `cancel`).
+Operations match by operation name plus a hash of the redacted arguments
+(fields the adapter marks nondeterministic are left out) and invocation
+order. Replayed callbacks run on `NativeAdapter.callbackExecutor`, by default
+one background thread per adapter. Operations not in
+`NativeAdapter.operations` run uncaptured with an `operation.unsupported`
+gap. `NativeAdapterConformance` (`bugcapsule-android-replay`) checks an
+adapter end to end in a JVM unit test.
+
+**Replay checks.** Before the app starts, every required dependency needs
+an installed adapter with the same id and a supported schema, and open
+connections at a periodic checkpoint must be restorable; otherwise the
+attempt ends `incompatible` with a message starting with
+`dependency.unsupported`, `dependency.schema` or `dependency.unrestorable`.
+During replay:
+
+| Divergence | Meaning |
+|---|---|
+| `ws.unrecorded`, `native.unrecorded` | An operation with no recording; it fails (`onFailure` with `ConnectException`, `NativeError.UNRECORDED`) |
+| `ws.mismatch`, `native.mismatch` | Matched, but the payload or arguments differ |
+| `ws.noPayload`, `native.noPayload` | A recorded value replay cannot hand over (metadata only, truncated, redacted) |
+| `ws.undelivered`, `native.undelivered` | A due event had no handler for 5 s |
+| `ws.unused`, `native.unused` | Recorded at or before the failure and never matched or delivered |
+| `ws.unusedAfterFailure`, `native.unusedAfterFailure` | The same after the failure (expected) |
+| `dependency.live` | The SDK was reached during replay |
+
+All but `*.unusedAfterFailure` keep `verify` from reporting a fix. A
+delivery that is due keeps idle compression from skipping past it.
+
 ## `bugcapsule.json`
 
 ```jsonc
@@ -344,8 +420,17 @@ which requests the app makes, so verifying those capsules is (correctly)
   network interceptors, caching and cookies are not exercised in replay.
   Custom `RequestBody`s that are not one-shot must be re-writable.
 - Clock/random determinism only through `BugCapsule.currentTimeMillis()` and
-  `BugCapsule.random()`. WorkManager, alarms, Bluetooth, location, other
-  network stacks (HttpURLConnection, Ktor, Cronet) are not captured.
+  `BugCapsule.random()`. WorkManager, alarms and Bluetooth are not captured.
+  Other network stacks (HttpURLConnection, Ktor, Cronet, WebSockets not opened
+  through `BugCapsuleWebSockets`) and SDKs such as location, maps or Firebase
+  are captured only through an adapter (`NativeAdapter`).
+- Interaction replay: connections and subscriptions open at a periodic
+  checkpoint are not restored (the OkHttp WebSocket adapter has no snapshot;
+  native adapters only with `NativeAdapter.restorable`). Ping/pong and frame
+  details are not recorded. Event order across WebSockets follows the app's
+  own operations in replay; only events due at the same time are ordered by
+  their recorded sequence. A listener that blocks delays every replayed
+  socket.
 - Monitoring: coroutines do not carry the current span (`startSpan` is per
   thread; HTTP and database spans attach to the scope's transaction); the
   ANR watchdog reports hangs while the process is alive (ANRs that kill the

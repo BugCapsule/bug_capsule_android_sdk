@@ -25,6 +25,11 @@ data class RemoteCaptureConfig(
     val maxBreadcrumbs: Int? = null,
     /** When set, replaces the app's `tracePropagationTargets`. */
     val tracePropagationTargets: List<String>? = null,
+    /**
+     * capsule-v2 §7: interaction adapter ids (e.g. `bugcapsule-okhttp.websocket`)
+     * that stop capturing; HTTP capture is unaffected.
+     */
+    val disabledAdapters: List<String> = emptyList(),
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf(
         "enabled" to enabled,
@@ -40,6 +45,7 @@ data class RemoteCaptureConfig(
         "sessionTracking" to sessionTracking,
         "maxBreadcrumbs" to maxBreadcrumbs,
         "tracePropagationTargets" to tracePropagationTargets,
+        "disabledAdapters" to disabledAdapters,
     )
 
     companion object {
@@ -71,6 +77,7 @@ data class RemoteCaptureConfig(
                 sessionTracking = field("sessionTracking", Boolean::class.javaObjectType) ?: true,
                 maxBreadcrumbs = field("maxBreadcrumbs", Long::class.javaObjectType)?.coerceIn(0, 100)?.toInt(),
                 tracePropagationTargets = field("tracePropagationTargets", List::class.java)?.map { it.toString() },
+                disabledAdapters = (field("disabledAdapters", List::class.java) ?: emptyList<Any?>()).map { it.toString() }.take(100),
             )
         }
     }

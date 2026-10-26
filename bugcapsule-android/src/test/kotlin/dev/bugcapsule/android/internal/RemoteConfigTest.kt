@@ -191,4 +191,12 @@ class RemoteConfigTest {
         assertEquals(null, old.errorSampleRate)
         assertEquals(null, old.tracePropagationTargets)
     }
+
+    @Test
+    fun disabledAdaptersParseAndSurviveTheCache() {
+        val c = RemoteCaptureConfig.fromJson(mapOf("disabledAdapters" to listOf("bugcapsule-okhttp.websocket")), fetchedAtMs = 1)
+        assertEquals(listOf("bugcapsule-okhttp.websocket"), c.disabledAdapters)
+        assertEquals(c, RemoteCaptureConfig.fromJson(c.toJson()))
+        assertEquals(emptyList<String>(), RemoteCaptureConfig.fromJson(mapOf("enabled" to true), fetchedAtMs = 1).disabledAdapters)
+    }
 }

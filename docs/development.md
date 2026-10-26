@@ -27,7 +27,10 @@ the demo uses through `pluginManagement { includeBuild(...) }`.
 `spec-fixtures/` must equal the Flutter SDK's `spec/fixtures`
 (`FixtureSyncTest`). Re-sync with `tool/sync_spec.sh` in
 [bug_capsule_flutter_sdk](https://github.com/BugCapsule/bug_capsule_flutter_sdk),
-with both repositories checked out side by side.
+with both repositories checked out side by side. The script does not yet copy
+`capsule-v2`; copy `spec/fixtures/capsule-v2` next to `capsule-v1` by hand.
+`InteractionConformanceTest` and `ConformanceTest.verdicts` run
+`conformance/interactions.json` and `conformance/verdicts.json`.
 
 ## Release procedure
 

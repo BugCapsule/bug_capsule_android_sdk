@@ -7,7 +7,10 @@ import dev.bugcapsule.android.ReplayContext
 import dev.bugcapsule.android.WorkToken
 import dev.bugcapsule.android.core.Capsule
 import dev.bugcapsule.android.core.CaptureMode
+import dev.bugcapsule.android.core.CapsuleCodec
 import dev.bugcapsule.android.core.CapsuleEvent
+import dev.bugcapsule.android.core.InteractionRecorder
+import dev.bugcapsule.android.replay.InteractionReplay
 import dev.bugcapsule.android.core.Divergence
 import dev.bugcapsule.android.core.FixtureStore
 import dev.bugcapsule.android.core.Redactor
@@ -22,8 +25,24 @@ class FakeSession(
     override var captureNetworkBodies: Boolean = true,
     override val maxBodyBytes: Int = 256 * 1024,
     override val redactor: Redactor = Redactor(),
+    /** Session clock (event `t`); default wall time. */
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) : BugCapsuleSession {
     val events: MutableList<Pair<String, Map<String, Any?>>> = Collections.synchronizedList(ArrayList())
+    private val timed: MutableList<CapsuleEvent> = Collections.synchronizedList(ArrayList())
+
+    /** Remote `disabledAdapters`. */
+    @Volatile
+    var disabledAdapters: List<String> = emptyList()
+    val recorder = InteractionRecorder(
+        sink = { type, data -> record(type, data) },
+        now = { now() },
+        redactor = { redactor },
+        recording = { isRecording },
+        payloadsEnabled = { captureNetworkBodies },
+        disabledAdapters = { disabledAdapters },
+    )
+    override val interactions: InteractionRecorder? get() = if (replay == null) recorder else null
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     override val config: BugCapsuleConfig = BugCapsuleConfig.builder().build()
     override val mode = CaptureMode.QA
@@ -31,9 +50,23 @@ class FakeSession(
     override val isReplaying get() = replay != null
     override val applicationContext: Context get() = throw UnsupportedOperationException()
     override var replay: ReplayContext? = null
-    override fun now() = System.currentTimeMillis()
+    override fun now() = clock()
     override fun record(type: String, data: Map<String, Any?>) {
-        events.add(type to data)
+        synchronized(timed) {
+            events.add(type to data)
+            timed.add(CapsuleEvent(timed.size + 1L, now(), type, data))
+        }
+    }
+
+    /** What was recorded as a capsule (v2 when an interaction adapter recorded), re-read from its bytes. */
+    fun capsule(): Capsule {
+        val recorded = synchronized(timed) { timed.toList() }
+        val base = FakeReplay.of(emptyList()).capsule
+        val capsule = base.copy(
+            manifest = base.manifest.copy(dependencies = recorder.dependencies(recorded), eventCount = recorded.size),
+            events = recorded,
+        )
+        return CapsuleCodec.decode(CapsuleCodec.encode(capsule))
     }
     override fun reportError(error: Throwable) {}
     override fun schedule(delayMs: Long, task: Runnable) {
@@ -49,12 +82,32 @@ class FakeSession(
     }
 }
 
-class FakeReplay(capsule: Capsule, override val settings: ReplaySettings = ReplaySettings()) : ReplayContext {
+class FakeReplay(
+    capsule: Capsule,
+    override val settings: ReplaySettings = ReplaySettings(),
+    /** Replay clock of interaction deliveries; default real time since creation. */
+    clock: (() -> Long)? = null,
+    /** False: the test calls `interactions.pump()` (with [deliveryExecutor] callbacks run inside it). */
+    autoPump: Boolean = true,
+    deliveryExecutor: java.util.concurrent.Executor? = null,
+) : ReplayContext {
     override val capsule = capsule
+
     override val fixtures = FixtureStore(capsule.events)
     val divergences: MutableList<Divergence> = Collections.synchronizedList(ArrayList())
     val served = AtomicInteger()
     val work = AtomicInteger()
+
+    /** Interaction replay with its delivery thread, like the engine's. */
+    private val started = System.nanoTime()
+    override val interactions: InteractionReplay = InteractionReplay(
+        capsule,
+        clock ?: { (System.nanoTime() - started) / 1_000_000 },
+        ::diverge,
+        autoPump = autoPump,
+        deliveryExecutor = deliveryExecutor,
+    )
+        .also { it.runStarted() }
     override fun diverge(type: String, detail: String) {
         divergences.add(Divergence(type, detail))
     }
