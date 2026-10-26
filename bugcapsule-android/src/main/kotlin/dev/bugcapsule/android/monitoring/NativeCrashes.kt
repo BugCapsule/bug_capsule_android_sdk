@@ -330,7 +330,8 @@ internal class NativeCrashes(private val dir: File) {
                     "stacktrace" to linkedMapOf("frames" to frames),
                 ),
             )
-            ev["debugImages"] = images.values.filter { it["debugId"] != null }.toList()
+            // App libraries only: nobody uploads system libraries' symbols, and their frames have dladdr names.
+            ev["debugImages"] = images.values.filter { it["debugId"] != null && isAppLibrary(it["codeFile"] as String, appId) }.toList()
         }
 
         private fun hex(v: Long) = "0x" + java.lang.Long.toHexString(v)
