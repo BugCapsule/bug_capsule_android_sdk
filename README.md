@@ -63,13 +63,13 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.4")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.4")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.4")    // optional: SQLite / Room spans
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.4")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.5")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.5")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.5")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.5")
 }
 ```
 
@@ -348,17 +348,15 @@ ANRs and OOM kills get **no capsule**, but they are still reported by
 
 ### Install the CLI
 
-The `bugcapsule` CLI replays capsules from every BugCapsule SDK. It is a Dart
-tool shipped in the Flutter package, so it needs
-[Flutter](https://docs.flutter.dev/get-started/install) installed even for
-Android projects.
+The standalone `bugcapsule` CLI replays capsules from every BugCapsule SDK.
+Install it with Node.js 20 or newer; Dart and Flutter are not required.
 
 ```bash
-dart pub global activate bug_capsule 0.4.1-beta.2
+npm install -g @bugcapsule/cli@0.4.0-beta.3
 bugcapsule --version
 ```
 
-If the shell can't find `bugcapsule`, add `~/.pub-cache/bin` to your `PATH`.
+Direct executables are also available from the [CLI release](https://github.com/BugCapsule/bug_capsule_flutter_sdk/releases/tag/v0.4.1-beta.7).
 
 Log in with a personal token from **Project settings → Keys & CLI access**.
 In CI, use a service token in `BUGCAPSULE_TOKEN` instead.
@@ -465,7 +463,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.4" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.5" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
@@ -574,7 +572,7 @@ and distribution require prior written permission. See [LICENSE](LICENSE).
 
 ### Keyboard state during pointer replay
 
-Version 0.4.1-beta.4 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
+Version 0.4.1-beta.5 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
 
 ## Optional capsule screenshots (unreleased)
 
