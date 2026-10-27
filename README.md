@@ -63,13 +63,13 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.4")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.4")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.4")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.4")    // optional: SQLite / Room spans
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.4")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.5")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.5")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.5")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.5")    // optional: SQLite / Room spans
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.5")
 }
 ```
 
@@ -354,7 +354,7 @@ tool shipped in the Flutter package, so it needs
 Android projects.
 
 ```bash
-dart pub global activate bug_capsule 0.4.1-beta.2
+npm install -g @bugcapsule/cli@0.4.0-beta.3
 bugcapsule --version
 ```
 
@@ -465,7 +465,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.4" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.5" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
@@ -574,7 +574,7 @@ and distribution require prior written permission. See [LICENSE](LICENSE).
 
 ### Keyboard state during pointer replay
 
-Version 0.4.1-beta.4 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
+Version 0.4.1-beta.5 records soft-keyboard visibility with pointer input and restores it before each gesture. Existing capsules without this field keep their original replay behavior; recapture with this SDK to include keyboard state. The runner does not bypass Android input permissions or ignore failed input.
 
 ## Optional capsule screenshots (unreleased)
 
