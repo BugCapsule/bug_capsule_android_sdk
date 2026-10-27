@@ -27,7 +27,9 @@ object CapsuleCodec {
         "format" to FORMAT,
         "specVersion" to capsule.specVersion,
         // v2 requires `dependencies`, empty for a crash capsule without interactions.
-        "manifest" to capsule.manifest.toJson().also { if (capsule.specVersion >= 2) it.putIfAbsent("dependencies", emptyList<Any?>()) },
+        "manifest" to capsule.manifest.toJson().let {
+            if (capsule.specVersion >= 2 && "dependencies" !in it) it + ("dependencies" to emptyList<Any?>()) else it
+        },
         "checkpoint" to capsule.checkpoint.toJson(),
         "events" to capsule.events.map { it.toJson() },
     )
