@@ -186,7 +186,7 @@ internal class ExitReasons(
             val images = LinkedHashMap<String, Map<String, Any?>>()
             for (i in (J.list(ev["debugImages"]) ?: emptyList()).mapNotNull { J.obj(it) } + tombstone.debugImages(appId)) {
                 // One image per library; ours first (its address is where this process loaded it).
-                images.putIfAbsent((i["codeFile"] ?: i["debugId"]).toString(), i)
+                images.getOrPut((i["codeFile"] ?: i["debugId"]).toString()) { i }
             }
             ev["debugImages"] = images.values.toList()
         }
