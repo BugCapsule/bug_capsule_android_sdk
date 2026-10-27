@@ -104,7 +104,7 @@ object Verdicts {
                     return AttemptAssessment(r, AttemptStatus.INVALID, reasons)
                 }
                 // `failure.different_frame` (crash capsules): the same crash type in another in-app frame.
-                return AttemptAssessment(r, AttemptStatus.REPRODUCED, emptyList(), listOfNotNull(r.reasonCode))
+                return AttemptAssessment(r, AttemptStatus.REPRODUCED, emptyList(), (listOfNotNull(r.reasonCode) + r.divergences.filter { it.type == "failure.different_frame" }.map { it.type }).distinct().sorted())
             }
             ReplayOutcome.INCONCLUSIVE -> {
                 reasons.add("inconclusive: ${r.message ?: r.reasonCode ?: "no reason given"}")
@@ -123,6 +123,7 @@ object Verdicts {
                     reasons.add("only ${r.eventsDispatched} of $expected recorded inputs were replayed")
                 }
                 for (f in r.otherFailures) reasons.add("unexpected failure: ${f.signature}")
+                if (r.otherFailures.any { it.kind == FailureKind.CRASH } || (r.otherFailures.isNotEmpty() && r.expectedSignature?.startsWith("crash:") == true)) codes.add("failure.different")
                 val material = LinkedHashSet<String>()
                 for (d in r.divergences) if (DivergencePolicy.isMaterial(d.type)) material.add(d.type)
                 for (type in material) {
