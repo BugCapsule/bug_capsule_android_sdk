@@ -7,6 +7,7 @@ import dev.bugcapsule.android.BugCapsule
 import dev.bugcapsule.android.BugCapsuleConfig
 import dev.bugcapsule.android.core.CapsuleCodec
 import dev.bugcapsule.android.core.CaptureMode
+import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
@@ -404,6 +405,110 @@ class MonitoringIntegrationTest {
         assertEquals(4, J.list(event["threads"])!!.size)
         // Seen once: the next start does not report it again.
         assertTrue(java.io.File(tmp.root, "monitoring/exit_info.json").readText().contains("1761000005000"))
+    }
+
+    /**
+     * A recording session journals what it records (crash-capsules §1); the
+     * journal is left as the crashed process would leave it, under [pid].
+     */
+    private fun recordAndCrash(pid: Int): java.io.File {
+        start()
+        val rt = runtime()
+        rt.onFirstDraw()
+        rt.onLifecycle("resumed")
+        rt.record(EventTypes.ACTION, mapOf("id" to "cart.open"))
+        rt.record(EventTypes.ACTION, mapOf("id" to "checkout.pay"))
+        val journal = rt.syncJournal()!!
+        val crashed = java.io.File(tmp.root, "journal/$pid")
+        journal.copyRecursively(crashed)
+        BugCapsule.resetForTest()
+        envelopes.clear()
+        capsules.clear()
+        return crashed
+    }
+
+    private fun relaunch(): Pair<Map<String, Any?>?, dev.bugcapsule.android.core.Capsule> {
+        start()
+        flushAll()
+        BugCapsule.flushUploads().get(10, TimeUnit.SECONDS)
+        val capsule = CapsuleCodec.decode(synchronized(capsules) { capsules.single() })
+        return items("event").singleOrNull() to capsule
+    }
+
+    @Test
+    fun aNativeCrashOfARecordingProcessUploadsACrashCapsuleAndItsEventLinksToIt() {
+        val journal = recordAndCrash(123)
+        val root = java.io.File(tmp.root, "native").apply { mkdirs() }
+        java.io.File(root, "context.json").writeText("{\"release\":\"com.shop@0.9.0+8\",\"environment\":\"qa\"}")
+        val crashedAt = System.currentTimeMillis()
+        java.io.File(root, "123-$crashedAt.crash").writeText(
+            "bugcapsule-native-crash 1\nsignal 11\ncode 1\naddress 0x0\ntid 77\nthread main\ntimestamp $crashedAt\nabi arm64-v8a\n" +
+                "frame 0x7a00001000 0x7a00000000 0x7a00000f00 /data/app/x/lib/arm64/libshop.so checkout_native\nend\n",
+        )
+        val (event, capsule) = relaunch()
+        event!!
+        assertEquals("fatal", event["level"])
+        assertEquals("the event links the capsule", capsule.manifest.capsuleId, event["capsuleId"])
+        assertEquals("the capsule links the event", event["eventId"], capsule.manifest.monitoring!!["eventId"])
+        assertEquals("com.shop@0.9.0+8", capsule.manifest.monitoring!!["release"])
+        val m = capsule.manifest
+        assertEquals(2, capsule.specVersion)
+        assertEquals("crash:SIGSEGV", m.failure!!.signature)
+        assertEquals("checkout_native", m.failure!!.crash!!["inAppFrame"])
+        assertEquals("crash_journal", m.labels["source"])
+        assertEquals("signal", m.labels["crash.mechanism"])
+        assertTrue(m.eligibility.missing.any { it.dependency == "crash.native" })
+        assertNotNull(m.journalGapMs)
+        assertEquals(CheckpointKind.LAUNCH, capsule.checkpoint.kind)
+        assertEquals(listOf("cart.open", "checkout.pay"), capsule.events.filter { it.type == EventTypes.ACTION }.map { it.data["id"] })
+        assertFalse("the journal is deleted once the capsule is queued", journal.exists())
+        assertEquals("crash capsules do not count against maxCapsulesPerSession", 0, BugCapsule.savedCaptures().count { it.name != "${m.capsuleId}.bugcapsule" })
+    }
+
+    @Test
+    fun anAnrKillOfARecordingProcessGetsACrashCapsule() {
+        recordAndCrash(777)
+        java.io.File(tmp.root, "monitoring/exit_info.json").writeText("{\"lastTimestamp\":1761000000000}")
+        val trace = ExitReasonsTest.ANR_TRACE.toByteArray()
+        PreviousProcess.exitInfoOverride = ExitInfoSource {
+            listOf(ExitRecord(777, ExitRecord.REASON_ANR, System.currentTimeMillis(), 100, "Input dispatching timed out", app.packageName) { trace.inputStream() })
+        }
+        val (event, capsule) = relaunch()
+        assertEquals(capsule.manifest.capsuleId, event!!["capsuleId"])
+        assertEquals("crash:ApplicationNotResponding", capsule.manifest.failure!!.signature)
+        assertEquals("anr", capsule.manifest.labels["crash.mechanism"])
+    }
+
+    @Test
+    fun anAnrTheWatchdogReportedStillGetsACapsuleLinkedToThatEvent() {
+        recordAndCrash(778)
+        java.io.File(tmp.root, "monitoring/exit_info.json").writeText("{\"lastTimestamp\":1761000000000}")
+        java.io.File(tmp.root, "monitoring/watchdog_anr.json").writeText("{\"pid\":778,\"eventId\":\"0a0a0a0a-0000-4000-8000-000000000778\"}")
+        PreviousProcess.exitInfoOverride = ExitInfoSource {
+            listOf(ExitRecord(778, ExitRecord.REASON_ANR, System.currentTimeMillis(), 100, "Input dispatching timed out", app.packageName) { null })
+        }
+        val (event, capsule) = relaunch()
+        assertNull("the watchdog sent the event while the process ran", event)
+        assertEquals("0a0a0a0a-0000-4000-8000-000000000778", capsule.manifest.monitoring!!["eventId"])
+        assertEquals("crash:ApplicationNotResponding", capsule.manifest.failure!!.signature)
+    }
+
+    @Test
+    fun aCrashWithoutAJournalSendsTheEventOnlyAndUnclaimedJournalsAreDeleted() {
+        val orphan = recordAndCrash(555)
+        val root = java.io.File(tmp.root, "native").apply { mkdirs() }
+        java.io.File(root, "124-1761000000000.crash").writeText(
+            "bugcapsule-native-crash 1\nsignal 6\ncode -6\naddress 0x0\ntid 77\nthread main\ntimestamp 1761000000500\nabi arm64-v8a\nend\n",
+        )
+        start()
+        flushAll()
+        BugCapsule.flushUploads().get(10, TimeUnit.SECONDS)
+        val event = items("event").single()
+        assertNull(event["capsuleId"])
+        assertTrue(capsules.isEmpty())
+        runtime().executor.submit {}.get(5, TimeUnit.SECONDS)
+        assertFalse("no fatal event claimed it", orphan.exists())
+        assertTrue("this process journals", java.io.File(tmp.root, "journal/${android.os.Process.myPid()}").exists())
     }
 
     @Test

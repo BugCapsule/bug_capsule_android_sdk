@@ -127,7 +127,10 @@ object CrashBridge {
             if (!previous.isEmpty) {
                 executor.execute {
                     previous.report(s.appId, s.inApp) { c ->
+                        if (c.alreadyReported) return@report
                         val ev = event(s, "fatal", c.timestampMs, c.release ?: release, c.environment ?: environment, c.scope, c.fill)
+                        // The embedding SDK finds the crashed process's own crash journal by this pid.
+                        if (c.pid != null) ev["contexts"] = LinkedHashMap(J.obj(ev["contexts"]) ?: emptyMap()).also { it["process"] = linkedMapOf("pid" to c.pid) }
                         store(s, ev)
                     }
                 }

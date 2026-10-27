@@ -18,6 +18,8 @@ internal class ExitRecord(
     val importance: Int,
     val description: String?,
     val processName: String?,
+    /** `ApplicationExitInfo.getStatus()`: the signal number of a signaled process. */
+    val status: Int = 0,
     private val trace: () -> InputStream?,
 ) {
     fun openTrace(): InputStream? = try {
@@ -34,6 +36,7 @@ internal class ExitRecord(
         const val REASON_CRASH = 4
         const val REASON_CRASH_NATIVE = 5
         const val REASON_ANR = 6
+        const val REASON_SIGNALED = 2
         const val IMPORTANCE_FOREGROUND = 100
     }
 }

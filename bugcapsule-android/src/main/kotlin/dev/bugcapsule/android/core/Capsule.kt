@@ -290,10 +290,12 @@ data class CapsuleManifest(
     val monitoring: Map<String, Any?>? = null,
     /** capsule-v2 §2: interaction dependencies; non-empty makes the capsule v2. */
     val dependencies: List<CapsuleDependency> = emptyList(),
+    /** crash-capsules §2 `stats.journalGapMs`: crash time minus the last journaled event's time. */
+    val journalGapMs: Long? = null,
 ) {
     val runtimeName: String get() = runtime?.name ?: RuntimeInfo.infer(sdkName)
 
-    fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
+    fun toJson(): MutableMap<String, Any?> = linkedMapOf<String, Any?>(
         "capsuleId" to capsuleId,
         "createdAt" to Iso8601.format(createdAtMs),
         "mode" to mode.wire,
@@ -310,7 +312,7 @@ data class CapsuleManifest(
             "eventCount" to eventCount,
             "droppedEvents" to droppedEvents,
             "checkpointKind" to checkpointKind.wire,
-        ),
+        ).also { stats -> if (journalGapMs != null) stats["journalGapMs"] = journalGapMs },
         "labels" to labels,
     ).also {
         if (redactionKeys.isNotEmpty() || redactionHeaders.isNotEmpty()) {
@@ -348,6 +350,7 @@ data class CapsuleManifest(
                 eventCount = J.int(stats["eventCount"]) ?: 0,
                 droppedEvents = J.int(stats["droppedEvents"]) ?: 0,
                 checkpointKind = CheckpointKind.parse(J.str(stats["checkpointKind"]) ?: "launch"),
+                journalGapMs = J.long(stats["journalGapMs"]),
                 labels = (J.obj(j["labels"]) ?: emptyMap()).mapValues { it.value as String },
                 redactionKeys = (J.list(redaction["extraKeys"]) ?: emptyList()).map { it as String },
                 redactionHeaders = (J.list(redaction["extraHeaders"]) ?: emptyList()).map { it as String },
@@ -371,8 +374,13 @@ data class Capsule(
 ) {
     fun eventsOfType(type: String) = events.filter { it.type == type }
 
-    /** 2 when the capsule has interaction dependencies (capsule-v2), else 1: v1 tooling keeps reading v1-only sessions. */
-    val specVersion: Int get() = if (manifest.dependencies.isEmpty()) 1 else 2
+    /**
+     * 2 when the capsule has interaction dependencies (capsule-v2) or is a
+     * crash capsule (crash-capsules §2), else 1: v1 tooling keeps reading
+     * v1-only sessions.
+     */
+    val specVersion: Int
+        get() = if (manifest.dependencies.isEmpty() && manifest.failure?.kind != FailureKind.CRASH) 1 else 2
 
     /** The dependency [id] names, or null. */
     fun dependency(id: String): CapsuleDependency? = manifest.dependencies.firstOrNull { it.id == id }

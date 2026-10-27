@@ -23,6 +23,8 @@ internal class PreviousProcess private constructor(
     private val scope: Map<String, Any?>?,
     /** Release / environment the records were written with (read before the handler is reinstalled). */
     private val ctx: Map<String, Any?>,
+    /** The system's ANR kill of a process whose hang the watchdog reported while it ran, with that event's id. */
+    private val watchdogAnr: Pair<ExitRecord, String?>? = null,
 ) {
     /** The previous run ended with a native crash at this time (its session is `crashed`, not `abnormal`). */
     val crashedAtMs: Long? = run {
@@ -36,20 +38,30 @@ internal class PreviousProcess private constructor(
         at
     }
 
-    val isEmpty: Boolean get() = records.isEmpty() && exits.isEmpty()
+    val isEmpty: Boolean get() = records.isEmpty() && exits.isEmpty() && watchdogAnr == null
 
     /**
      * One fatal event to send, built by [fill]. [scope] is the crashed
      * process's (empty when unknown: never the current process's).
      */
     class Crash(
+        /** The crashed process (its crash journal is `journal/<pid>`), when known. */
+        val pid: Int?,
         val mechanism: String,
         val timestampMs: Long?,
         val release: String?,
         val environment: String?,
         val scope: Map<String, Any?>,
+        /**
+         * Set when the event was already sent while the process ran (an ANR
+         * the watchdog reported before the system killed the app): no new
+         * event, but a crash capsule may still link to this one.
+         */
+        val reportedEventId: String? = null,
         val fill: (MutableMap<String, Any?>) -> Unit,
-    )
+    ) {
+        val alreadyReported: Boolean get() = reportedEventId != null
+    }
 
     /**
      * Calls [emit] for each crash, oldest records first, and deletes the
@@ -71,7 +83,7 @@ internal class PreviousProcess private constructor(
                     val s = record.scope ?: scopeOf(pid) ?: emptyMap()
                     emit(
                         Crash(
-                            "signal", record.timestampMs,
+                            pid, "signal", record.timestampMs,
                             J.str(s["release"]) ?: ctx["release"] as? String,
                             J.str(s["environment"]) ?: ctx["environment"] as? String,
                             s,
@@ -99,7 +111,7 @@ internal class PreviousProcess private constructor(
                     else -> "signal"
                 }
                 emit(
-                    Crash(mechanism, exit.timestampMs, J.str(s["release"]), J.str(s["environment"]), s) { ev ->
+                    Crash(exit.pid, mechanism, exit.timestampMs, J.str(s["release"]), J.str(s["environment"]), s) { ev ->
                         when (exit.reason) {
                             ExitRecord.REASON_ANR -> ExitReasons.fillAnr(ev, exit, inApp)
                             ExitRecord.REASON_LOW_MEMORY -> ExitReasons.fillLowMemory(ev, exit)
@@ -111,6 +123,23 @@ internal class PreviousProcess private constructor(
                 SdkLog.w("could not report exit record of pid ${exit.pid}: $e")
             }
             // Only now: a process that dies before this point reports the exit next time.
+            exitReasons?.markHandled(exit.timestampMs)
+        }
+        watchdogAnr?.let { (exit, eventId) ->
+            if (eventId != null) {
+                try {
+                    val s = scopeOf(exit.pid) ?: emptyMap()
+                    emit(
+                        Crash(
+                            exit.pid, "anr", exit.timestampMs, J.str(s["release"]), J.str(s["environment"]), s,
+                            fill = { ev -> ExitReasons.fillAnr(ev, exit, inApp) },
+                            reportedEventId = eventId,
+                        ),
+                    )
+                } catch (e: Throwable) {
+                    SdkLog.w("could not report the ANR exit of pid ${exit.pid}: $e")
+                }
+            }
             exitReasons?.markHandled(exit.timestampMs)
         }
         newestExitMs?.let { exitReasons?.markHandled(it) }
@@ -138,23 +167,35 @@ internal class PreviousProcess private constructor(
             val ctx = if (records.isEmpty()) emptyMap() else native.previousContext()
             // The ANR watchdog already reported the hang of this process (an `error` event while it ran):
             // the system's ANR exit for it would count the same hang twice.
-            val watchdogPid = try {
-                if (watchdogAnrFile?.exists() == true) J.int(J.obj(Json.parse(watchdogAnrFile.readText()))?.get("pid")) else null
+            val watchdog = try {
+                if (watchdogAnrFile?.exists() == true) J.obj(Json.parse(watchdogAnrFile.readText())) else null
             } catch (_: Exception) {
                 null
             }
+            val watchdogPid = J.int(watchdog?.get("pid"))
             val fresh = exits?.takeNew() ?: emptyList()
             val reportable = fresh.filter { ExitReasons.reportable(it) && !(it.reason == ExitRecord.REASON_ANR && it.pid == watchdogPid) }
+            val watchdogExit = fresh.lastOrNull { it.reason == ExitRecord.REASON_ANR && it.pid == watchdogPid }
             val newest = fresh.maxOfOrNull { it.timestampMs }
-            if (reportable.isEmpty() && newest != null) exits?.markHandled(newest)
-            return PreviousProcess(native, records, exits, reportable, newest, scope, ctx)
+            if (reportable.isEmpty() && watchdogExit == null && newest != null) exits?.markHandled(newest)
+            return PreviousProcess(
+                native, records, exits, reportable, newest, scope, ctx,
+                watchdogExit?.let { it to J.str(watchdog?.get("eventId")) },
+            )
         }
 
-        /** Remembers that the watchdog reported an ANR of this process (see [collect]). */
-        fun noteWatchdogAnr(file: File) {
+        /**
+         * Remembers that the watchdog reported an ANR of this process (see
+         * [collect]), with the id of its event when there is one: a crash
+         * capsule built after the system kills the app links to it.
+         */
+        fun noteWatchdogAnr(file: File, eventId: String? = null) {
             try {
                 dev.bugcapsule.android.internal.Files.writeAtomically(
-                    file, Json.stringify(linkedMapOf("pid" to android.os.Process.myPid())).toByteArray(),
+                    file,
+                    Json.stringify(
+                        linkedMapOf<String, Any?>("pid" to android.os.Process.myPid()).also { if (eventId != null) it["eventId"] = eventId },
+                    ).toByteArray(),
                 )
             } catch (_: Exception) {
             }
@@ -186,7 +227,7 @@ internal class PreviousProcess private constructor(
             if (android.os.Build.VERSION.SDK_INT < 30) return@ExitInfoSource emptyList()
             val am = context.getSystemService(android.app.ActivityManager::class.java) ?: return@ExitInfoSource emptyList()
             am.getHistoricalProcessExitReasons(null, 0, 16).map { info ->
-                ExitRecord(info.pid, info.reason, info.timestamp, info.importance, info.description, info.processName) { info.traceInputStream }
+                ExitRecord(info.pid, info.reason, info.timestamp, info.importance, info.description, info.processName, info.status) { info.traceInputStream }
             }
         }
     }

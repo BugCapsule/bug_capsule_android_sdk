@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import dev.bugcapsule.android.core.Capsule
 import dev.bugcapsule.android.core.CapsuleFormatException
 import dev.bugcapsule.android.core.Divergence
+import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayProtocol
@@ -114,6 +115,89 @@ object BugCapsuleReplay {
         return true
     }
 
+    /** A post-mortem armed by [armPostMortem]: judges how the previous attempt's process died. */
+    private class PostMortem(val channel: ReplayChannel, val sink: StatusSink?, val context: Context)
+
+    @Volatile
+    private var postMortem: PostMortem? = null
+
+    /**
+     * Arms a post-mortem (crash capsules, docs/crash-capsules.md §4): the
+     * previous attempt's process died before it could report (a native
+     * signal, a low-memory kill). Must run before `Application.onCreate`;
+     * `BugCapsule.init` then stays off in this process, and
+     * `BugCapsuleReplayTest#judgeProcessDeath` reports for the dead attempt
+     * through the same channel. Returns false when refused.
+     */
+    @JvmStatic
+    fun armPostMortem(instrumentation: Instrumentation, url: String, sink: StatusSink?): Boolean {
+        val context = instrumentation.targetContext
+        val channel = try {
+            ReplayChannel(url)
+        } catch (e: IllegalArgumentException) {
+            SdkLog.w("invalid replay URL: ${e.message}")
+            return false
+        }
+        if (!isDebuggable(context)) {
+            deliverOffMain(channel, sink, errorReport(null, "replay refused: the app under test is not debuggable"))
+            return false
+        }
+        postMortem = PostMortem(channel, sink, context)
+        return true
+    }
+
+    @JvmStatic
+    fun isPostMortem(): Boolean = postMortem != null
+
+    /**
+     * Reports the dead attempt: its exit record (API 30+) judged against the
+     * crash it should reproduce, waiting up to [timeoutMs] for the record.
+     * The exit is also marked handled, so the app's next capture launch does
+     * not report a replay crash as a production one.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun runPostMortem(timeoutMs: Long = 10_000): ReplayReport? {
+        val pm = postMortem ?: return null
+        val settings = AtomicReference<ReplaySettings?>()
+        val fetch = Thread({
+            settings.set(
+                try {
+                    pm.channel.fetchSettings()
+                } catch (_: Throwable) {
+                    null
+                },
+            )
+        }, "BugCapsule-postmortem")
+        fetch.start()
+        fetch.join(30_000)
+        val exits = dev.bugcapsule.android.monitoring.PreviousProcess.systemExits(pm.context)
+        val report = CrashReplay.postMortem(
+            CrashReplay.markerFile(pm.context.noBackupFilesDir),
+            settings.get()?.attemptId,
+            pm.context.packageName,
+            exits,
+            timeoutMs,
+            android.os.Build.VERSION.SDK_INT,
+        )
+        try {
+            val dead = report.death?.let { J.long(it["pid"]) }
+            if (dead != null) {
+                val handled = exits.exits().filter { it.pid.toLong() == dead }.maxOfOrNull { it.timestampMs }
+                if (handled != null) {
+                    dev.bugcapsule.android.monitoring.ExitReasons(
+                        java.io.File(pm.context.noBackupFilesDir, "bugcapsule/monitoring/exit_info.json"),
+                        pm.context.packageName,
+                        exits,
+                    ).markHandled(handled)
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        deliverOffMain(pm.channel, pm.sink, report)
+        return report
+    }
+
     @JvmStatic
     fun isDebuggable(context: Context): Boolean =
         (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
@@ -193,6 +277,7 @@ object BugCapsuleReplay {
     @JvmStatic
     fun resetForTest() {
         armed = null
+        postMortem = null
         engineRef.set(null)
         engineLatch = CountDownLatch(1)
         anchorLatch = CountDownLatch(1)

@@ -92,9 +92,11 @@ class InteractionRecorder @JvmOverloads constructor(
 
     /**
      * `manifest.dependencies` for a capsule whose window holds [events]:
-     * every registered dependency with events in the window or with gaps.
+     * every registered dependency with events in the window or with gaps
+     * ([all]: every registered dependency, for the crash journal's header).
      */
-    fun dependencies(events: List<CapsuleEvent>): List<CapsuleDependency> {
+    @JvmOverloads
+    fun dependencies(events: List<CapsuleEvent>, all: Boolean = false): List<CapsuleDependency> {
         val counts = HashMap<String, Int>()
         for (e in events) {
             if (!InteractionTypes.isInteraction(e.type)) continue
@@ -103,7 +105,7 @@ class InteractionRecorder @JvmOverloads constructor(
         }
         return recorders().mapNotNull { r ->
             val d = r.descriptor
-            if ((counts[d.id] ?: 0) == 0 && !r.stats.hasGaps) return@mapNotNull null
+            if (!all && (counts[d.id] ?: 0) == 0 && !r.stats.hasGaps) return@mapNotNull null
             CapsuleDependency(
                 id = d.id,
                 kind = d.kind,

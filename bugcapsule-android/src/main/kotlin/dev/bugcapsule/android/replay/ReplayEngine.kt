@@ -7,6 +7,7 @@ import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.Divergence
 import dev.bugcapsule.android.core.EventTypes
+import dev.bugcapsule.android.core.FailureKind
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.core.FixtureStore
 import dev.bugcapsule.android.core.IdleCompressor
@@ -49,6 +50,14 @@ interface ReplayDriver {
 
     /** Injects a recorded system key (`key` event); false when unsupported. */
     fun dispatchKey(phase: String, keyCode: Int): Boolean = false
+
+    /** Posts [task] to the app's main thread without waiting (the ANR watchdog of crash capsules). */
+    fun postToMain(task: Runnable) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(task)
+    }
+
+    /** The app's main thread, whose stack names the in-app frame of an ANR. */
+    fun mainThread(): Thread? = android.os.Looper.getMainLooper().thread
 }
 
 /**
@@ -63,6 +72,10 @@ class ReplayEngine(
     val buildGitSha: String?,
     private val reporter: ReplayReporter?,
     private val nanoTime: () -> Long = System::nanoTime,
+    /** Crash capsules: where an attempt that may die leaves what the post-mortem needs ([CrashReplay.markerFile]). */
+    private val attemptMarker: java.io.File? = null,
+    /** Crash capsules: how long the main thread may block before it is an ANR. */
+    private val anrThresholdMs: Long = CrashReplay.ANR_THRESHOLD_MS,
 ) : ReplayContext {
     override val fixtures = FixtureStore(capsule.events)
     private val idle = IdleCompressor(capsule.events)
@@ -80,6 +93,10 @@ class ReplayEngine(
     private val reported = AtomicBoolean(false)
     private val createdNs = nanoTime()
     private var finalized = false
+
+    /** A crash capsule (crash-capsules §4): the attempt is judged by how the app dies. */
+    val expectsCrash: Boolean = capsule.manifest.failure?.kind == FailureKind.CRASH
+    private val death = AtomicReference<CrashReplay.Death?>()
 
     /**
      * Interaction dependencies (capsule-v2 §5) on the replay clock
@@ -151,10 +168,20 @@ class ReplayEngine(
     private val quietMs: Long get() = msSince(lastActivityNs.get())
     private val busy: Int get() = work.get() + synchronized(pressed) { pressed.size }
 
+    /** The expected failure happened, or (crash capsules) the app is dying: the run stops. */
     val isReproduced: Boolean get() = reproduced.count == 0L
 
-    /** Called by the runtime for every failure seen while replaying. */
-    fun onFailure(failure: FailureRecord) {
+    /**
+     * Called by the runtime for every failure seen while replaying. [fatal]:
+     * an uncaught exception, the process dies next; for a crash capsule that
+     * is a death of another type.
+     */
+    @JvmOverloads
+    fun onFailure(failure: FailureRecord, fatal: Boolean = false) {
+        if (expectsCrash && fatal) {
+            onDeath(CrashReplay.Death(failure.type, "uncaught", "uncaught", failure.message))
+            return
+        }
         val expected = capsule.manifest.failure
         if (expected != null && failure.signature == expected.signature) {
             if (observed.compareAndSet(null, failure)) reproduced.countDown()
@@ -162,6 +189,11 @@ class ReplayEngine(
             synchronized(otherFailures) { if (otherFailures.size < 50) otherFailures.add(failure) }
             diverge("failure.other", failure.signature)
         }
+    }
+
+    /** Crash capsules: the app under test is dying (or hung) this way; the run stops and the report judges it. */
+    fun onDeath(d: CrashReplay.Death) {
+        if (death.compareAndSet(null, d)) reproduced.countDown()
     }
 
     /** Checks that apply before the app starts. */
@@ -220,6 +252,11 @@ class ReplayEngine(
         val expected = capsule.manifest.failure
         val toDispatch = inputs()
         expectedInputs = toDispatch.size
+        var watchdog: Thread? = null
+        if (expectsCrash && expected != null) {
+            attemptMarker?.let { CrashReplay.writeMarker(it, capsule.manifest.capsuleId, settings, expected, strategy, toDispatch.size) }
+            watchdog = startAnrWatchdog(driver)
+        }
 
         var lastT = 0L
         var previous = base
@@ -254,9 +291,46 @@ class ReplayEngine(
             val remaining = deadline - elapsed()
             if (remaining > 0) reproduced.await(remaining, TimeUnit.MILLISECONDS)
         }
+        watchdog?.interrupt()
         val report = buildReport()
         reportOnce(report)
         return report
+    }
+
+    /**
+     * Crash capsules: the main thread blocked for [anrThresholdMs] is an
+     * ANR. Reported at once, while the process still lives (the system may
+     * kill it next).
+     */
+    private fun startAnrWatchdog(driver: ReplayDriver): Thread = Thread({
+        try {
+            while (!isReproduced) {
+                val ran = CountDownLatch(1)
+                driver.postToMain { ran.countDown() }
+                if (!ran.await(anrThresholdMs, TimeUnit.MILLISECONDS)) {
+                    val stack = try {
+                        driver.mainThread()?.stackTrace ?: emptyArray()
+                    } catch (_: Throwable) {
+                        emptyArray()
+                    }
+                    onDeath(
+                        CrashReplay.Death(
+                            "ApplicationNotResponding", "anr", "watchdog",
+                            "the main thread was blocked for ${anrThresholdMs} ms",
+                            pid = android.os.Process.myPid(),
+                            inAppFrame = CrashReplay.inAppFrame(stack, capsule.manifest.app.id),
+                        ),
+                    )
+                    finishNow("the main thread was blocked for ${anrThresholdMs} ms (ANR)")
+                    return@Thread
+                }
+                Thread.sleep(ANR_POLL_MS)
+            }
+        } catch (_: InterruptedException) {
+        }
+    }, "BugCapsule-ReplayAnr").apply {
+        isDaemon = true
+        start()
     }
 
     /**
@@ -280,6 +354,8 @@ class ReplayEngine(
 
     private fun reportOnce(report: ReplayReport): Boolean {
         if (!reported.compareAndSet(false, true)) return false
+        // Reported from this process: nothing for a post-mortem to judge.
+        attemptMarker?.let { dev.bugcapsule.android.internal.Files.deleteQuietly(it) }
         try {
             reporter?.report(report)
         } catch (_: Exception) {
@@ -305,9 +381,12 @@ class ReplayEngine(
             }
         }
         val expected = capsule.manifest.failure
-        val seen = observed.get()
+        val died = if (expectsCrash) death.get() else null
+        val judgment = if (expected != null && died != null) CrashReplay.judge(expected, died) else null
+        val seen = if (expectsCrash) died?.toFailure(elapsed()) else observed.get()
         val outcome = when {
             expected == null -> ReplayOutcome.NO_ASSERTION
+            judgment != null -> judgment.outcome
             seen != null -> ReplayOutcome.REPRODUCED
             else -> ReplayOutcome.NOT_REPRODUCED
         }
@@ -329,6 +408,8 @@ class ReplayEngine(
             message = message,
             attemptId = settings.attemptId,
             runtime = "android",
+            reasonCode = judgment?.reasonCode,
+            death = died?.toJson(),
         )
     }
 
@@ -382,6 +463,10 @@ class ReplayEngine(
         } catch (e: Exception) {
             diverge("dispatch.error", "${event.type}: $e")
         }
+    }
+
+    private companion object {
+        const val ANR_POLL_MS = 500L
     }
 
     private fun dispatchPointer(d: Map<String, Any?>, driver: ReplayDriver, screen: ScreenInfo?) {

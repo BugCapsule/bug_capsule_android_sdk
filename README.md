@@ -423,6 +423,14 @@ Monitoring runs in every session, whether or not it records a capsule:
 When a capsule is written for an error, the error links to it, so each issue
 lists the capsules that replay it.
 
+**Crashes that kill the process are replayable too.** A recording session
+keeps a crash journal on disk (written off the main thread, at most
+`2 × maxCapsuleBytes`). When the process dies of a native crash, an ANR kill
+or a foreground low-memory kill, the next launch builds a crash capsule from
+that journal and links it to the crash's event. Replay reports `reproduced`
+when the app dies the same way again. Details:
+[docs/how-it-works.md](docs/how-it-works.md#crash-capsules).
+
 Crashes and ANRs list every thread, main thread first. A crash reported on the
 next launch (native crash, ANR kill) carries the breadcrumbs, user, tags and
 release of the process that crashed, not of the launch that reports it.
@@ -528,6 +536,8 @@ with backoff. Storage and network errors never reach your app. Details:
   that were open at a periodic checkpoint; such capsules are marked
   ineligible and replay reports `incompatible`.
 - The NDK crash handler is not yet verified on physical devices.
+- Crash capsules miss at most the last 250 ms before a native crash, and replay
+  judges native and low-memory deaths on Android 11+ only.
 
 Full list: [docs/how-it-works.md#limitations](docs/how-it-works.md#limitations).
 

@@ -11,6 +11,7 @@ and the full list of limitations. The capsule format is documented at
 - [Failure-capture boundaries](#failure-capture-boundaries)
 - [Monitoring](#monitoring)
 - [Replay](#replay)
+- [Crash capsules](#crash-capsules)
 - [Interaction dependencies](#interaction-dependencies)
 - [`bugcapsule.json`](#bugcapsulejson)
 - [Storage and uploads](#storage-and-uploads)
@@ -297,6 +298,121 @@ boot; an emulator the CLI booted is shut down afterwards. The device must be
 unlocked once after boot (AVDs with a screen-lock PIN cannot be unlocked by
 the CLI).
 
+## Crash capsules
+
+A native crash, an ANR the system killed the app for and a foreground
+low-memory kill leave no time to write a capsule. A recording session
+therefore keeps a **crash journal** on disk, and the next launch builds a
+capsule from it and links it to the crash's fatal event (contract:
+`docs/crash-capsules.md` in the backend repository).
+Nothing changes for the app: no API, no option.
+
+### The journal
+
+Only sessions that record (the capsule sampling decision) keep one, in
+`noBackupFilesDir/bugcapsule/journal/<pid>/`:
+
+| File | Content |
+|---|---|
+| `header.json` | The manifest fields known while recording (`mode`, `app`, `source`, `sdk`, `platform`, `session`, `integrations`, `labels`, `redaction`, `runtime`, `capabilities`, every registered interaction dependency) plus `pid`, `release`, `environment`, `writtenAt` and `anchorT` (recorder time of the first frame). Rewritten when it changes: first frame, each periodic checkpoint, new redaction rules |
+| `checkpoints/<afterSeq>.json` | The checkpoint the recorder's window starts at (the launch checkpoint until the recorder evicts) and the newest periodic one |
+| `events/<firstSeq>.jsonl` | One event per line, as in a capsule; a new file starts at each checkpoint |
+
+Event and checkpoint times are the recorder's (ms since the SDK started); the
+builder shifts them to the session anchor. Recording only enqueues: one
+background thread (`BugCapsule-Journal`) serializes and appends, with one
+`write` per flush, at least every 250 ms and at once on a checkpoint, a
+recorded failure, an ANR seen by the watchdog and `paused`. A native crash
+loses at most the last 250 ms. When the recorder evicts events or moves its
+window to a later checkpoint, the journal deletes the files it no longer
+needs. On disk it holds at most `2 × maxCapsuleBytes`: past that it keeps only
+the newest checkpoint and its events, and if that alone is too big it keeps
+nothing until the next checkpoint. When remote config re-redacts or drops
+buffered events, the journal is rewritten from the recorder. It is deleted
+when recording stops (kill switch, rejected key, lowered sample rate) and
+after a JVM crash, whose capsule the uncaught handler writes synchronously.
+
+### Next launch
+
+For each fatal event about an earlier process (an NDK record, an exit record
+of `REASON_CRASH_NATIVE`, `REASON_ANR` or a foreground `REASON_LOW_MEMORY`)
+whose pid has a journal younger than 7 days, the SDK builds the capsule before
+it queues the event:
+
+- `checkpoint`: the first kept checkpoint whose following events are all in
+  the journal, else the newest periodic one (`events.window` gap); the newest
+  periodic one also when the first capsule is over `maxCapsuleBytes`; no
+  capsule when that is still too big;
+- `manifest.failure`: kind `crash`, `signature` `crash:<type>` (`SIGSEGV`,
+  `ApplicationNotResponding`, `OutOfMemory`, `NativeCrash` when Android had
+  no tombstone), `crash: {mechanism, signal?, inAppFrame?}`, the crashed
+  frames as `stack`, `t` = crash time relative to the anchor;
+- `manifest.monitoring` = `{eventId, release, environment}` of the event, and
+  the event's `capsuleId` = the capsule;
+- eligibility gap `crash.native` (a crash capsule is at best `partial`), plus
+  the usual integration, dependency and checkpoint checks;
+- `labels.source = crash_journal`, `labels["crash.mechanism"]` (`signal`,
+  `anr`, `oom`); `stats.journalGapMs` = crash time − last journaled event;
+- format v2 always (`dependencies` may be empty).
+
+The capsule is saved, queued in the outbox and the journal deleted. Crash
+capsules do not count against `maxCapsulesPerSession`. An ANR the watchdog
+already reported while the app ran is not sent again; its capsule links to the
+watchdog's event (`manifest.monitoring.eventId`). Journals that no fatal event
+claims, and any older than 7 days, are deleted once the previous processes
+have been reported. `CrashBridge` builds no capsules (the Flutter SDK journals
+on the Dart side); its events of earlier processes carry
+`contexts.process.pid` so the embedding SDK can find its own journal.
+
+### Replaying a crash capsule
+
+The engine replays the events as usual and judges the attempt by how the app
+under test dies:
+
+| What happens | Report |
+|---|---|
+| The process dies with the same `type` (same signal; ANR; low-memory kill) | `outcome: reproduced`; `reasonCode: failure.different_frame` when both sides know the in-app frame and it differs |
+| The process dies with another type (another signal, an uncaught JVM exception, an ANR for a signal capsule) | `outcome: inconclusive`, `reasonCode: failure.different` |
+| The window ends and the process is alive | `outcome: not_reproduced` |
+
+An uncaught JVM exception reports synchronously from the crash handler. The
+main thread blocked for 5 s is an ANR: a watchdog reports it at once, while
+the process lives (`death.source: watchdog`). A native signal or a
+low-memory kill ends the process before it can report: the engine wrote
+`noBackupFilesDir/bugcapsule-replay/crash-attempt.json` (attempt, pid,
+expected crash) when the run started, and deletes it whenever it reports.
+
+**What the CLI must do.** When `am instrument` ends without a
+`bugcapsule_result` (the instrumentation reports `Process crashed`), run the
+post-mortem with the same replay URL, before clearing the app:
+
+```
+am instrument -r -w -e bugcapsuleReplayUrl <url> -e bugcapsuleReplayPostMortem true \
+  -e class dev.bugcapsule.android.replay.BugCapsuleReplayTest#judgeProcessDeath <testAppId>/<runner>
+```
+
+It fetches `/settings` (for the `attemptId`), reads the marker, waits up to
+10 s for the system's exit record of the marked pid (Android 11+), judges it
+and posts the report to `/result` and as the status line, like a replay.
+`BugCapsule.init` stays off in that process, and the exit is marked handled so
+the app's next capture launch does not report a replay crash. Android 10 and
+older have no exit records: the post-mortem reports `error`, and the CLI can
+judge from `adb logcat -b crash` (`Fatal signal <n> (<SIG…>)` of the pid).
+
+**Result fields** (in addition to the usual ones):
+
+| Field | Meaning |
+|---|---|
+| `outcome` | `reproduced`, `not_reproduced`, or **`inconclusive`** (new; older readers parse it as `error`, also an invalid attempt) |
+| `reasonCode` | `failure.different` (with `inconclusive`), `failure.different_frame` (with `reproduced`), else absent |
+| `death` | How the app died: `{mechanism: signal\|anr\|oom\|uncaught, type, signal?, pid?, source: uncaught\|watchdog\|exit_info\|tombstone, inAppFrame?}`; absent while it lives |
+| `observed` | The death as a failure (kind `crash`, `signature` `crash:<type>`) |
+| `expectedSignature` | `crash:<type>` of the capsule |
+
+`inconclusive` attempts are invalid: `verify` keeps its rules (a batch with an
+invalid attempt is `inconclusive`; `not_reproduced` only when every attempt
+is). `Verdicts` adds the attempt's `reasonCode` to the batch's reason codes.
+
 ## Interaction dependencies
 
 WebSockets and third-party SDKs are recorded as *interaction dependencies*
@@ -426,6 +542,9 @@ never captured).
   `min(productionSampleRate (0.1), project sample rate)`.
 - Storage never crashes the app: atomic writes, temp files cleaned at start,
   corrupt files dropped, a full disk drops the capsule.
+- Crash journals (`journal/<pid>/`) are already-redacted capsule data with
+  the same protection as saved capsules (`noBackupFilesDir`, never uploaded
+  as they are); see [Crash capsules](#crash-capsules).
 - The kill switch stops recording and deletes queued and saved capsules.
   Remote config can also disable body capture (also stripping buffered
   bodies) and add redaction keys (re-redacting the buffer).
@@ -501,6 +620,12 @@ which requests the app makes, so verifying those capsules is (correctly)
   app before 5 s are `abnormal` sessions); NDK frames are not symbolicated on
   device and the NDK handler is not yet verified on devices (host smoke test
   and builds only).
+- Crash capsules: events of the last 250 ms before a native crash can be
+  missing (`stats.journalGapMs`); HTTP requests in flight at the crash are not
+  in the capsule (replay sees them as unrecorded); integration eligibility is
+  checked by the next launch's integrations; replay judges native and
+  low-memory deaths only on Android 11+ (exit records), and the in-app frame
+  only from Android 12+ tombstones and ANRs.
 - Navigation arguments that are Parcelables are not restored; state needs
   registered serializers. Periodic checkpoints are used only when the session
   outgrows the 5-minute / 20,000-event window.

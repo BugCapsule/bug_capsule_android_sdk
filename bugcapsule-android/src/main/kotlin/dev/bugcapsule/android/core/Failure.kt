@@ -1,7 +1,10 @@
 package dev.bugcapsule.android.core
 
 enum class FailureKind(val wire: String) {
-    EXCEPTION("exception"), ASSERTION("assertion"), MANUAL("manual");
+    EXCEPTION("exception"), ASSERTION("assertion"), MANUAL("manual"),
+
+    /** The process died: native signal, ANR kill, low-memory kill (crash-capsules §3; capsule format v2 only). */
+    CRASH("crash");
 
     companion object {
         @JvmStatic
@@ -18,18 +21,22 @@ data class FailureRecord(
     val t: Long,
     val stack: String? = null,
     val assertionId: String? = null,
+    /** Kind `crash`: `{mechanism, signal?, inAppFrame?}` (crash-capsules §3). */
+    val crash: Map<String, Any?>? = null,
 ) {
     fun shift(offsetMs: Long) = copy(t = t - offsetMs)
 
-    fun toJson(): Map<String, Any?> = linkedMapOf(
+    fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "kind" to kind.wire,
         "signature" to signature,
         "type" to type,
         "message" to message,
         "stack" to stack,
         "assertionId" to assertionId,
-        "t" to t,
-    )
+    ).also {
+        if (crash != null) it["crash"] = crash
+        it["t"] = t
+    }
 
     companion object {
         /**
@@ -71,6 +78,35 @@ data class FailureRecord(
                 t = t,
             )
 
+        /**
+         * A crash that ended the process (crash-capsules §3): [type] is the
+         * signal name, `ApplicationNotResponding` or `OutOfMemory`; the
+         * signature is `crash:<type>` (no addresses or lines: replay runs
+         * another build).
+         */
+        @JvmStatic
+        @JvmOverloads
+        fun crash(
+            type: String,
+            message: String,
+            t: Long,
+            mechanism: String,
+            signal: Int? = null,
+            inAppFrame: String? = null,
+            stack: String? = null,
+        ) = FailureRecord(
+            kind = FailureKind.CRASH,
+            signature = "crash:$type",
+            type = type,
+            message = truncate(message, 2000),
+            stack = stack?.let { truncate(it, 8000) },
+            t = t,
+            crash = linkedMapOf<String, Any?>("mechanism" to mechanism).also {
+                if (signal != null) it["signal"] = signal
+                if (inAppFrame != null) it["inAppFrame"] = truncate(inAppFrame, 500)
+            },
+        )
+
         @JvmStatic
         fun typeName(error: Throwable): String {
             val simple = error.javaClass.simpleName
@@ -93,6 +129,7 @@ data class FailureRecord(
             stack = J.str(j["stack"]),
             assertionId = J.str(j["assertionId"]),
             t = J.long(j["t"]) ?: 0,
+            crash = J.obj(j["crash"]),
         )
 
         private fun truncate(s: String, max: Int) = if (s.length <= max) s else s.substring(0, max) + "…"
