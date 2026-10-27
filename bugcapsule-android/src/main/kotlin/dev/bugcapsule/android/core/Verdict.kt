@@ -103,7 +103,12 @@ object Verdicts {
                     reasons.add("reported a reproduction without an expected failure")
                     return AttemptAssessment(r, AttemptStatus.INVALID, reasons)
                 }
-                return AttemptAssessment(r, AttemptStatus.REPRODUCED, emptyList())
+                // `failure.different_frame` (crash capsules): the same crash type in another in-app frame.
+                return AttemptAssessment(r, AttemptStatus.REPRODUCED, emptyList(), listOfNotNull(r.reasonCode))
+            }
+            ReplayOutcome.INCONCLUSIVE -> {
+                reasons.add("inconclusive: ${r.message ?: r.reasonCode ?: "no reason given"}")
+                r.reasonCode?.let { codes.add(it) }
             }
             ReplayOutcome.INCOMPATIBLE -> {
                 reasons.add("incompatible: ${r.message ?: "capsule cannot run against this build"}")

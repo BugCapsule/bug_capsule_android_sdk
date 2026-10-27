@@ -48,9 +48,10 @@ class MappingUploader(
      */
     fun uploadProguardMapping(mapping: File, debugId: String): Result = upload("proguard", debugId, mapping)
 
-    fun upload(kind: String, debugId: String, file: File): Result {
+    /** [params]: extra query parameters (`arch`, `name`, ...). */
+    fun upload(kind: String, debugId: String, file: File, params: Map<String, String> = emptyMap()): Result {
         require(secretKey.isNotBlank()) { "BugCapsule secret key is empty" }
-        val connection = URI(endpoint(kind, debugId)).toURL().openConnection() as HttpURLConnection
+        val connection = URI(endpoint(kind, debugId, params)).toURL().openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
             connection.connectTimeout = connectTimeoutMillis
@@ -82,12 +83,13 @@ class MappingUploader(
         }
     }
 
-    internal fun endpoint(kind: String, debugId: String): String {
+    internal fun endpoint(kind: String, debugId: String, params: Map<String, String> = emptyMap()): String {
         val base = baseUrl.trim().trimEnd('/')
         require(base.startsWith("http://") || base.startsWith("https://")) {
             "BugCapsule url must start with http:// or https:// (got '$base')"
         }
-        return "$base/v1/debug-files?kind=${encode(kind)}&debugId=${encode(debugId)}"
+        val extra = params.entries.joinToString("") { (k, v) -> "&${encode(k)}=${encode(v)}" }
+        return "$base/v1/debug-files?kind=${encode(kind)}&debugId=${encode(debugId)}$extra"
     }
 
     private companion object {

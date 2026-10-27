@@ -5,7 +5,8 @@ import org.gradle.api.Project
 
 /**
  * `dev.bugcapsule.gradle`: for Android application modules, embeds a ProGuard/R8
- * mapping id in the APK/AAB assets and uploads `mapping.txt` to BugCapsule.
+ * mapping id in the APK/AAB assets and uploads `mapping.txt` and the unstripped
+ * native libraries to BugCapsule.
  * Applying it to any other project only creates the `bugcapsule` extension.
  */
 class BugCapsulePlugin : Plugin<Project> {
@@ -19,6 +20,7 @@ class BugCapsulePlugin : Plugin<Project> {
             providers.gradleProperty("bugcapsuleSecretKey").orElse(providers.environmentVariable("BUGCAPSULE_SECRET_KEY")),
         )
         extension.uploadProguardMapping.convention(true)
+        extension.uploadNativeSymbols.convention(true)
         extension.failOnUploadError.convention(true)
 
         // AGP classes are only touched once AGP is present (they are compileOnly here).

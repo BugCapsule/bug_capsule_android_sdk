@@ -62,6 +62,18 @@ class BugCapsuleReplayTest {
         }
     }
 
+    /**
+     * Crash capsules: reports the previous attempt, whose process died before
+     * it could (docs/crash-capsules.md §4). Skipped unless the runner was
+     * started with `-e bugcapsuleReplayPostMortem true`.
+     */
+    @Test
+    fun judgeProcessDeath() {
+        assumeTrue("no BugCapsule post-mortem armed", BugCapsuleReplay.isPostMortem())
+        val report = BugCapsuleReplay.runPostMortem()
+        Log.i("BugCapsule", "post-mortem: ${report?.outcome?.wire} ${report?.reasonCode ?: ""}")
+    }
+
     private companion object {
         const val ENGINE_TIMEOUT_MS = 20_000L
     }

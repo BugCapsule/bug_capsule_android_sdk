@@ -16,8 +16,8 @@ class SessionsTest {
     private val sent = ArrayList<Pair<Map<String, Any?>, Boolean>>()
     private var user: String? = null
 
-    private fun tracker(file: File = File(tmp.root, "session.json")) = SessionTracker(
-        file, "install-1", "app@1+1", "qa", 30_000, { hub.now }, { user },
+    private fun tracker(file: File = File(tmp.root, "session.json"), release: String = "app@1+1", environment: String = "qa") = SessionTracker(
+        file, "install-1", release, environment, 30_000, { hub.now }, { user },
         { p, sync -> sent.add(p to sync) }, hub::schedule,
     )
 
@@ -94,5 +94,25 @@ class SessionsTest {
         sent.clear()
         tracker().recoverPrevious(null)
         assertTrue("recovered once", sent.isEmpty())
+    }
+
+    @Test
+    fun aRecoveredSessionKeepsTheReleaseItRanWithAfterAnUpdate() {
+        tracker(release = "app@1+1", environment = "production").onForeground()
+        sent.clear()
+        tracker(release = "app@2+2", environment = "staging").recoverPrevious(crashedAtMs = hub.now + 1_000)
+        val recovered = sent.single().first
+        assertEquals("crashed", recovered["status"])
+        assertEquals("app@1+1", recovered["release"])
+        assertEquals("production", recovered["environment"])
+    }
+
+    @Test
+    fun aSessionFileWithoutReleaseFallsBackToTheCurrentOne() {
+        val file = File(tmp.root, "session.json")
+        file.writeText("""{"sid":"b3a1c2d4-0000-4000-8000-000000000001","did":"d","started":1,"seq":2,"status":"ok","errors":0,"timestamp":5}""")
+        tracker(release = "app@2+2").recoverPrevious(null)
+        assertEquals("abnormal", sent.single().first["status"])
+        assertEquals("app@2+2", sent.single().first["release"])
     }
 }

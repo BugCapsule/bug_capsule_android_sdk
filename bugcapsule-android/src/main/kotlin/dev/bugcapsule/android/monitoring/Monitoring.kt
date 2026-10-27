@@ -195,6 +195,8 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         hint = Hint(error, mechanism.type, capsuleId),
     ) { ev ->
         ev["exception"] = linkedMapOf("values" to ExceptionMapper.values(error, mechanism, inApp, env.redactor::scrubText))
+        // A crash: what every other thread was doing (the crashing one's stack is the exception's).
+        if (fatal) ev["threads"] = ThreadDump.threads(Thread.currentThread(), Thread.currentThread(), inApp)
     }
 
     fun captureMessage(message: String, level: Level, options: CaptureOptions? = null): Captured? =
@@ -228,7 +230,12 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
             )
         }
 
-    /** A prepared event body (ANR, native crash); [timestampMs] defaults to now. */
+    /**
+     * A prepared event body (ANR, native crash); [timestampMs] defaults to now.
+     * [previousScope]: the scope of the process the event happened in, as
+     * mirrored by [scopeJson] (a crash reported on the next launch); used in
+     * place of the current scope.
+     */
     fun captureRaw(
         level: Level,
         hint: Hint,
@@ -237,8 +244,12 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         releaseOverride: String? = null,
         environmentOverride: String? = null,
         countInSession: Boolean = true,
+        previousScope: Map<String, Any?>? = null,
+        /** A capsule already queued for this event (crash capsules), with the [eventId] it links to. */
+        capsuleId: String? = null,
+        eventId: String? = null,
         fill: (MutableMap<String, Any?>) -> Unit,
-    ): Captured? = capture(level, null, fatal, null, hint, timestampMs, releaseOverride, environmentOverride, countInSession, fill)
+    ): Captured? = capture(level, null, fatal, capsuleId, hint, timestampMs, releaseOverride, environmentOverride, countInSession, previousScope, eventId, fill)
 
     private fun capture(
         level: Level,
@@ -250,12 +261,14 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         releaseOverride: String? = null,
         environmentOverride: String? = null,
         countInSession: Boolean = true,
+        previousScope: Map<String, Any?>? = null,
+        presetEventId: String? = null,
         fill: (MutableMap<String, Any?>) -> Unit,
     ): Captured? {
         if (!active) return null
         return try {
-            val snap = currentScope().snapshot()
-            val eventId = CoreIds.uuidV4()
+            val snap = if (previousScope != null) Scope(0).snapshot() else currentScope().snapshot()
+            val eventId = presetEventId ?: CoreIds.uuidV4()
             val ev = linkedMapOf<String, Any?>(
                 "eventId" to eventId,
                 "timestamp" to Iso8601.format(timestampMs ?: env.nowMs()),
@@ -276,6 +289,8 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
             ev["request"] = null
             ev["extra"] = snap.extras + (options?.extra ?: emptyMap())
             ev["capsuleId"] = capsuleId
+            if (previousScope != null) applyPreviousScope(ev, previousScope)
+            J.list(ev["threads"])?.let { list -> ev["threads"] = ThreadDump.fit(list.mapNotNull { J.obj(it) }) }
             if (fatal) ev["level"] = Level.FATAL.wire
 
             // Release health counts every error, sampled or not.
@@ -340,6 +355,109 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         out.putAll(extra)
         out["trace"] = trace
         return out
+    }
+
+    // ---------------------------------------------------- crash-time scope
+
+    @Volatile
+    private var nativeScopeSink: ((ByteArray) -> Unit)? = null
+
+    @Volatile
+    private var scopeFile: File? = null
+
+    @Volatile
+    private var mirrorScheduled = false
+
+    @Volatile
+    private var fileWriteScheduled = false
+
+    @Volatile
+    private var lastScopeFileWriteMs = 0L
+
+    /**
+     * Keeps a copy of the global scope where the next launch can find it:
+     * in [nativeSink] (the NDK handler's buffer, written into its crash
+     * record) at most every [SCOPE_MIRROR_DELAY_MS], and in [file] at most
+     * every [SCOPE_FILE_INTERVAL_MS] (for exits the process cannot record
+     * itself: ANRs and low-memory kills, see [ExitReasons]).
+     */
+    fun mirrorScope(nativeSink: ((ByteArray) -> Unit)?, file: File?) {
+        nativeScopeSink = nativeSink
+        scopeFile = file
+        scope.onChange = { scheduleMirror() }
+        scheduleMirror()
+    }
+
+    private fun scheduleMirror() {
+        if ((nativeScopeSink == null && scopeFile == null) || mirrorScheduled) return
+        mirrorScheduled = true
+        env.schedule(SCOPE_MIRROR_DELAY_MS) {
+            mirrorScheduled = false
+            mirrorScopeNow()
+        }
+    }
+
+    /** [force]: write the file now even within [SCOPE_FILE_INTERVAL_MS] (tests). */
+    internal fun mirrorScopeNow(force: Boolean = false) {
+        if (!active) return
+        val sink = nativeScopeSink
+        val file = scopeFile
+        if (sink == null && file == null) return
+        try {
+            val json = scopeJson(scope.snapshot())
+            sink?.invoke(json)
+            if (file != null) {
+                val now = env.nowMs()
+                if (force || now - lastScopeFileWriteMs >= SCOPE_FILE_INTERVAL_MS) {
+                    lastScopeFileWriteMs = now
+                    dev.bugcapsule.android.internal.Files.writeAtomically(file, json)
+                } else if (!fileWriteScheduled) {
+                    // Changed within the interval: one trailing write keeps the file current.
+                    // Its own flag: the native buffer keeps getting every change meanwhile.
+                    fileWriteScheduled = true
+                    env.schedule(SCOPE_FILE_INTERVAL_MS - (now - lastScopeFileWriteMs)) {
+                        fileWriteScheduled = false
+                        mirrorScopeNow()
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            SdkLog.once("could not mirror the scope for crash reports: $e")
+        }
+    }
+
+    /**
+     * The scope parts of an event (redacted, `app` context included) plus
+     * this process's `pid`, `release` and `environment`, as one line of JSON
+     * of at most [CRASH_SCOPE_MAX_BYTES]: the oldest breadcrumbs go first,
+     * then extras and contexts.
+     */
+    internal fun scopeJson(snap: Scope.Snapshot): ByteArray {
+        val contexts = LinkedHashMap<String, Any?>()
+        try {
+            env.deviceContexts()["app"]?.let { contexts["app"] = it }
+        } catch (_: Throwable) {
+        }
+        contexts.putAll(snap.contexts)
+        var crumbs = snap.breadcrumbs.takeLast(100).map { it.toJson() }
+        var withExtras = true
+        while (true) {
+            val m = linkedMapOf<String, Any?>(
+                "pid" to android.os.Process.myPid(),
+                "release" to release,
+                "environment" to environment,
+                "level" to snap.level?.wire,
+                "fingerprint" to snap.fingerprint,
+                "tags" to snap.tags,
+                "user" to user(snap.user),
+                "extra" to if (withExtras) snap.extras else emptyMap<String, Any?>(),
+                "contexts" to if (withExtras) contexts else emptyMap<String, Any?>(),
+                "breadcrumbs" to crumbs,
+            )
+            val bytes = Json.stringify(ItemRedaction.redact(env.redactor, m)).toByteArray(Charsets.UTF_8)
+            if (bytes.size <= CRASH_SCOPE_MAX_BYTES || (crumbs.isEmpty() && !withExtras)) return bytes
+            if (crumbs.isNotEmpty()) crumbs = crumbs.drop(maxOf(1, crumbs.size / 4)) else withExtras = false
+        }
     }
 
     // -------------------------------------------------------------- feedback
@@ -661,8 +779,35 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
     }
 
     companion object {
+        /**
+         * Puts a crashed process's scope (as [scopeJson] wrote it) on [ev]:
+         * level, fingerprint, tags, user, extras, breadcrumbs, and its contexts
+         * over this launch's device contexts.
+         */
+        fun applyPreviousScope(ev: MutableMap<String, Any?>, previous: Map<String, Any?>) {
+            Level.parse(J.str(previous["level"]))?.let { ev["level"] = it.wire }
+            J.list(previous["fingerprint"])?.let { list -> ev["fingerprint"] = Limits.fingerprint(list.mapNotNull { J.str(it) }) }
+            J.obj(previous["tags"])?.let { tags -> ev["tags"] = Limits.tags(tags.mapNotNull { (k, v) -> J.str(v)?.let { k to it } }.toMap()) }
+            J.obj(previous["user"])?.takeIf { it.isNotEmpty() }?.let { ev["user"] = it }
+            J.obj(previous["extra"])?.let { ev["extra"] = it }
+            J.list(previous["breadcrumbs"])?.let { ev["breadcrumbs"] = it.takeLast(100) }
+            J.obj(previous["contexts"])?.let { mirrored ->
+                // Device contexts are this launch's; `app` and the app's own contexts are the crashed process's.
+                val merged = LinkedHashMap(J.obj(ev["contexts"]) ?: emptyMap())
+                val trace = merged.remove("trace")
+                merged.putAll(mirrored)
+                if (trace != null) merged["trace"] = trace
+                ev["contexts"] = merged
+            }
+        }
+
         const val SDK_NAME = "bugcapsule-android"
         const val FLUSH_DELAY_MS = 2_000L
+        const val SCOPE_MIRROR_DELAY_MS = 100L
+        const val SCOPE_FILE_INTERVAL_MS = 1_000L
+
+        /** The native handler's scope buffer (bc_ndk_set_scope) is 64 KiB. */
+        const val CRASH_SCOPE_MAX_BYTES = 64 * 1024
     }
 }
 
