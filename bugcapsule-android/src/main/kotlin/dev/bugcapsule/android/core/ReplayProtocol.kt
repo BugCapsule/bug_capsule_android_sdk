@@ -68,6 +68,13 @@ enum class ReplayOutcome(val wire: String) {
     NOT_REPRODUCED("not_reproduced"),
     INCOMPATIBLE("incompatible"),
     NO_ASSERTION("no_assertion"),
+
+    /**
+     * The attempt proves nothing either way; [ReplayReport.reasonCode] says
+     * why (crash capsules: `failure.different`, the app died of another
+     * crash type). Older readers parse it as `error`, which is also invalid.
+     */
+    INCONCLUSIVE("inconclusive"),
     ERROR("error");
 
     companion object {
@@ -105,6 +112,10 @@ data class ReplayReport(
     val message: String? = null,
     val attemptId: String? = null,
     val runtime: String? = null,
+    /** Machine-readable reason (`failure.different`, `failure.different_frame`); null when there is none. */
+    val reasonCode: String? = null,
+    /** Crash capsules: how the app under test died (`{mechanism, type, signal?, pid?, source, inAppFrame?}`), null while it lives. */
+    val death: Map<String, Any?>? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "outcome" to outcome.wire,
@@ -125,6 +136,8 @@ data class ReplayReport(
     ).also {
         if (attemptId != null) it["attemptId"] = attemptId
         if (runtime != null) it["runtime"] = runtime
+        if (reasonCode != null) it["reasonCode"] = reasonCode
+        if (death != null) it["death"] = death
     }
 
     companion object {
@@ -147,6 +160,8 @@ data class ReplayReport(
             message = J.str(j["message"]),
             attemptId = J.str(j["attemptId"]),
             runtime = J.str(j["runtime"]),
+            reasonCode = J.str(j["reasonCode"]),
+            death = J.obj(j["death"]),
         )
     }
 }

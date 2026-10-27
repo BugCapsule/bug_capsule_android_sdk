@@ -18,6 +18,7 @@
  *   thread <thread name, may be empty>
  *   timestamp <decimal epoch ms>
  *   abi <arm64-v8a|armeabi-v7a|x86_64|x86>
+ *   scope <one line of JSON set with bc_ndk_set_scope, when set>
  *   frame 0x<pc> 0x<image base or 0> 0x<symbol address or 0> <image path or -> <symbol or ->
  *   ...   (crashing frame first; later frames are return addresses)
  *   end
@@ -82,6 +83,9 @@
 #define BC_MAX_SYMBOL 256
 #define BC_ALT_STACK_SIZE (64 * 1024)
 
+/* Largest scope (JSON) bc_ndk_set_scope accepts, in bytes. */
+#define BC_MAX_SCOPE (64 * 1024)
+
 /* Values of g_handling_tid besides a thread id. */
 #define BC_TID_NONE 0L
 #define BC_TID_DONE (-1L)
@@ -94,6 +98,18 @@ static struct sigaction g_previous[BC_SIGNAL_COUNT];
 static atomic_int g_installed;
 /* Thread currently writing the record (re-entrance / concurrent crash guard). */
 static atomic_long g_handling_tid;
+
+/*
+ * Scope mirror: the app's breadcrumbs, user, tags... as JSON, double-buffered
+ * so the handler always reads a complete copy. Writers fill the inactive
+ * buffer under g_scope_lock and publish it by switching g_scope_active; once
+ * the handler sets g_scope_reading no writer touches the buffers again.
+ */
+static char g_scope[2][BC_MAX_SCOPE];
+static size_t g_scope_len[2];
+static atomic_int g_scope_active = -1;
+static atomic_int g_scope_reading;
+static pthread_mutex_t g_scope_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static char g_alt_stack[BC_ALT_STACK_SIZE] __attribute__((aligned(16)));
 static stack_t g_previous_alt_stack;
@@ -179,6 +195,12 @@ static void bc_put_token(bc_writer *w, const char *s, size_t max_len) {
 /* Rest-of-line value: only line breaks are replaced. */
 static void bc_put_line_value(bc_writer *w, const char *s) {
     for (; *s; s++) bc_put_char(w, (*s == '\n' || *s == '\r') ? '_' : *s);
+}
+
+/* Like bc_put_line_value for len bytes (JSON: raw line breaks only occur as whitespace). */
+static void bc_put_line_bytes(bc_writer *w, const char *s, size_t len) {
+    size_t i;
+    for (i = 0; i < len; i++) bc_put_char(w, (s[i] == '\n' || s[i] == '\r') ? ' ' : s[i]);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -402,6 +424,17 @@ static void bc_write_record(int sig, siginfo_t *info, void *ucontext, long tid) 
     /* Flush the header first so it survives a crash inside the unwinder. */
     bc_flush(w);
 
+    atomic_store(&g_scope_reading, 1);
+    {
+        int active = atomic_load(&g_scope_active);
+        if (active == 0 || active == 1) {
+            bc_put_str(w, "scope ");
+            bc_put_line_bytes(w, g_scope[active], g_scope_len[active]);
+            bc_put_char(w, '\n');
+            bc_flush(w);
+        }
+    }
+
     count = bc_collect_frames(ucontext);
     for (i = 0; i < count; i++) bc_write_frame(w, g_frames[i], i > 0);
     bc_put_str(w, "end\n");
@@ -569,6 +602,23 @@ void bc_ndk_uninstall(void) {
 
 int bc_ndk_is_installed(void) {
     return atomic_load(&g_installed);
+}
+
+int bc_ndk_set_scope(const char *json, size_t len) {
+    int next;
+    if (json == NULL || len > BC_MAX_SCOPE) return 0;
+    pthread_mutex_lock(&g_scope_lock);
+    if (atomic_load(&g_scope_reading)) {
+        /* The process is crashing: keep the copy the handler is reading. */
+        pthread_mutex_unlock(&g_scope_lock);
+        return 0;
+    }
+    next = atomic_load(&g_scope_active) == 0 ? 1 : 0;
+    memcpy(g_scope[next], json, len);
+    g_scope_len[next] = len;
+    atomic_store(&g_scope_active, next);
+    pthread_mutex_unlock(&g_scope_lock);
+    return 1;
 }
 
 BC_EXPORT __attribute__((noinline)) void bugcapsule_ndk_crash_segv(void) {

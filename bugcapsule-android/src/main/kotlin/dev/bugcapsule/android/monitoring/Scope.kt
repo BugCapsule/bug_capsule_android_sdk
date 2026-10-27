@@ -26,39 +26,39 @@ class Scope internal constructor(maxBreadcrumbs: Int) {
             synchronized(lock) { trim() }
         }
 
-    fun setUser(user: User?) = synchronized(lock) { this.user = user }
+    fun setUser(user: User?) = synchronized(lock) { this.user = user }.also { changed() }
 
     fun getUser(): User? = synchronized(lock) { user }
 
-    fun setTag(key: String, value: String) = synchronized(lock) { tags[key] = value }
+    fun setTag(key: String, value: String) = synchronized(lock) { tags[key] = value }.also { changed() }
 
-    fun setTags(tags: Map<String, String>) = synchronized(lock) { this.tags.putAll(tags) }
+    fun setTags(tags: Map<String, String>) = synchronized(lock) { this.tags.putAll(tags) }.also { changed() }
 
-    fun removeTag(key: String) = synchronized(lock) { tags.remove(key) }
+    fun removeTag(key: String) = synchronized(lock) { tags.remove(key) }.also { changed() }
 
-    fun setExtra(key: String, value: Any?) = synchronized(lock) { extras[key] = value }
+    fun setExtra(key: String, value: Any?) = synchronized(lock) { extras[key] = value }.also { changed() }
 
-    fun setExtras(extras: Map<String, Any?>) = synchronized(lock) { this.extras.putAll(extras) }
+    fun setExtras(extras: Map<String, Any?>) = synchronized(lock) { this.extras.putAll(extras) }.also { changed() }
 
-    fun removeExtra(key: String) = synchronized(lock) { extras.remove(key) }
+    fun removeExtra(key: String) = synchronized(lock) { extras.remove(key) }.also { changed() }
 
     /** Sets `contexts.<name>` (null removes it). `device`, `os`, `app` and `trace` are filled by the SDK. */
     fun setContext(name: String, value: Map<String, Any?>?) = synchronized(lock) {
         if (value == null) contexts.remove(name) else contexts[name] = value
-    }
+    }.also { changed() }
 
     /** Overrides the level of every event captured with this scope. */
-    fun setLevel(level: Level?) = synchronized(lock) { this.level = level }
+    fun setLevel(level: Level?) = synchronized(lock) { this.level = level }.also { changed() }
 
     /** Custom grouping for every event captured with this scope (monitoring-v1 §4.2). */
-    fun setFingerprint(fingerprint: List<String>?) = synchronized(lock) { this.fingerprint = fingerprint }
+    fun setFingerprint(fingerprint: List<String>?) = synchronized(lock) { this.fingerprint = fingerprint }.also { changed() }
 
     internal fun addBreadcrumb(breadcrumb: Breadcrumb) = synchronized(lock) {
         breadcrumbs.addLast(breadcrumb)
         trim()
-    }
+    }.also { changed() }
 
-    fun clearBreadcrumbs() = synchronized(lock) { breadcrumbs.clear() }
+    fun clearBreadcrumbs() = synchronized(lock) { breadcrumbs.clear() }.also { changed() }
 
     /** The span new spans (HTTP, database, ...) attach to; screen transactions bind themselves here. */
     var activeSpan: Span?
@@ -74,6 +74,17 @@ class Scope internal constructor(maxBreadcrumbs: Int) {
         level = null
         fingerprint = null
         span = null
+    }.also { changed() }
+
+    /** Called after every change of the event data (not the active span); copies have none. */
+    @Volatile
+    internal var onChange: (() -> Unit)? = null
+
+    private fun changed() {
+        try {
+            onChange?.invoke()
+        } catch (_: Throwable) {
+        }
     }
 
     private fun trim() {

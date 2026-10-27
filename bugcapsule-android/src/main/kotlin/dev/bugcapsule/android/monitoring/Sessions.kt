@@ -37,14 +37,19 @@ internal class SessionTracker(
         var errors: Int,
         var timestamp: Long,
         var backgroundSince: Long?,
+        /** The release / environment the session ran with: a later process may run a newer build. */
+        val release: String,
+        val environment: String,
     ) {
         fun toJson(): Map<String, Any?> = linkedMapOf(
             "sid" to sid, "did" to did, "started" to started, "seq" to seq, "status" to status,
             "errors" to errors, "timestamp" to timestamp, "backgroundSince" to backgroundSince,
+            "release" to release, "environment" to environment,
         )
 
         companion object {
-            fun fromJson(j: Map<String, Any?>) = State(
+            /** [release] / [environment]: for files written before they were persisted. */
+            fun fromJson(j: Map<String, Any?>, release: String, environment: String) = State(
                 sid = j["sid"] as String,
                 did = j["did"] as String,
                 started = J.long(j["started"])!!,
@@ -53,6 +58,8 @@ internal class SessionTracker(
                 errors = J.int(j["errors"]) ?: 0,
                 timestamp = J.long(j["timestamp"]) ?: J.long(j["started"])!!,
                 backgroundSince = J.long(j["backgroundSince"]),
+                release = J.str(j["release"]) ?: release,
+                environment = J.str(j["environment"]) ?: environment,
             )
         }
     }
@@ -67,12 +74,13 @@ internal class SessionTracker(
     val currentSid: String? get() = synchronized(lock) { current?.sid }
 
     /**
-     * Finalizes the session a previous process left behind. [crashedAtMs]:
-     * the previous process ended with a native crash at that time.
+     * Finalizes the session a previous process left behind, with the release
+     * and environment it ran with. [crashedAtMs]: the previous process ended
+     * with a native crash at that time.
      */
     fun recoverPrevious(crashedAtMs: Long?) {
         val previous = try {
-            if (file.exists()) J.obj(Json.parse(file.readText()))?.let { State.fromJson(it) } else null
+            if (file.exists()) J.obj(Json.parse(file.readText()))?.let { State.fromJson(it, release, environment) } else null
         } catch (_: Exception) {
             null
         }
@@ -161,7 +169,7 @@ internal class SessionTracker(
     }
 
     private fun startLocked(now: Long) {
-        val s = State(CoreIds.uuidV4(), userId() ?: installId, now, 0, "ok", 0, now, null)
+        val s = State(CoreIds.uuidV4(), userId() ?: installId, now, 0, "ok", 0, now, null, release, environment)
         current = s
         persist(s)
         emit(payload(s, init = true), false)
@@ -195,8 +203,8 @@ internal class SessionTracker(
         "status" to s.status,
         "errors" to s.errors,
         "duration" to (s.timestamp - s.started).coerceAtLeast(0) / 1000.0,
-        "release" to release,
-        "environment" to environment,
+        "release" to s.release,
+        "environment" to s.environment,
         "runtime" to "android",
     )
 }

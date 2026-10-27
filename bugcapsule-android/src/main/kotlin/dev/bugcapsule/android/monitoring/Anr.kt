@@ -69,7 +69,7 @@ internal class AnrWatchdog(
     }
 
     companion object {
-        /** The event body of an ANR: the main thread's stack as the exception and in `threads`. */
+        /** The event body of an ANR: the main thread's stack as the exception and in `threads`, with every other thread. */
         fun fill(ev: MutableMap<String, Any?>, stack: Array<StackTraceElement>, blockedMs: Long, timeoutMs: Long, mainThread: Thread, inApp: InAppRules) {
             val frames = ExceptionMapper.frames(stack, inApp)
             ev["exception"] = linkedMapOf(
@@ -83,15 +83,8 @@ internal class AnrWatchdog(
                     ),
                 ),
             )
-            ev["threads"] = listOf(
-                linkedMapOf(
-                    "id" to mainThread.id,
-                    "name" to mainThread.name,
-                    "crashed" to true,
-                    "current" to false,
-                    "stacktrace" to linkedMapOf("frames" to frames),
-                ),
-            )
+            // The main thread first, then what every other thread was doing (often what it waits for).
+            ev["threads"] = ThreadDump.threads(mainThread, Thread.currentThread(), inApp, crashedFrames = frames, mainThread = mainThread)
         }
     }
 }

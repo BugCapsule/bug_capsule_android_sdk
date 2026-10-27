@@ -163,4 +163,26 @@ class CodecTest {
         assertTrue(text.contains("\"specVersion\":1,"))
         assertTrue(!text.contains("\"seq\":1.0"))
     }
+
+    @Test
+    fun crashFailuresAreVersion2AndRoundTrip() {
+        val failure = FailureRecord.crash("SIGSEGV", "Segmentation violation (code 1) at 0x0", 18_234, "signal", 11, "checkout_native", "#0 checkout_native (libshop.so)")
+        val capsule = dev.bugcapsule.android.replay.TestCapsules.capsule(emptyList(), failure).let {
+            it.copy(manifest = it.manifest.copy(journalGapMs = 120, labels = mapOf("source" to "crash_journal")))
+        }
+        assertEquals("a crash capsule is v2 without dependencies", 2, capsule.specVersion)
+        val again = CapsuleCodec.decode(CapsuleCodec.encode(capsule))
+        assertEquals(failure.copy(crash = null), again.manifest.failure!!.copy(crash = null))
+        assertEquals("crash:SIGSEGV", again.manifest.failure!!.signature)
+        assertEquals(120L, again.manifest.journalGapMs)
+        assertEquals(mapOf("mechanism" to "signal", "signal" to 11L, "inAppFrame" to "checkout_native"), again.manifest.failure!!.crash)
+
+        val v1 = CapsuleCodec.toJson(capsule).toMutableMap().also { it["specVersion"] = 1 }
+        expectFormatError(gz(Json.stringify(v1)), "\$.manifest.failure.kind")
+        val badCrash = CapsuleCodec.toJson(capsule).toMutableMap()
+        val m = (badCrash["manifest"] as Map<String, Any?>).toMutableMap()
+        m["failure"] = (m["failure"] as Map<String, Any?>) + ("crash" to mapOf("signal" to "eleven"))
+        badCrash["manifest"] = m
+        expectFormatError(gz(Json.stringify(badCrash)), "\$.manifest.failure.crash.signal")
+    }
 }

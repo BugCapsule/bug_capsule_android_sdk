@@ -149,6 +149,15 @@ class BugCapsuleConfig private constructor(b: Builder) {
     /** Needs the `bugcapsule-ndk` artifact; ignored without it. */
     val enableNativeCrashHandling: Boolean = b.enableNativeCrashHandling
 
+    /**
+     * Android 11+: on launch, reports how the previous process ended when
+     * the app could not report it itself, from `ApplicationExitInfo`: ANRs
+     * the system killed the app for (with every thread's stack), native
+     * crashes (every thread, from the tombstone, Android 12+) and low-memory
+     * kills while in the foreground.
+     */
+    val enableExitInfoTracking: Boolean = b.enableExitInfoTracking
+
     /** `ui.action.click` transactions for semantic actions ([BugCapsule.action], Compose/Views helpers). */
     val enableUserInteractionTracing: Boolean = b.enableUserInteractionTracing
     val enableAppStartTracking: Boolean = b.enableAppStartTracking
@@ -228,6 +237,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var sendDefaultPii = false
         internal var enableAnrTracking = true
         internal var anrTimeoutMs = 5_000L
+        internal var enableExitInfoTracking = true
         internal var enableNativeCrashHandling = true
         internal var enableUserInteractionTracing = false
         internal var enableAppStartTracking = true
@@ -258,6 +268,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
             beforeSendTransaction = c.beforeSendTransaction; beforeBreadcrumb = c.beforeBreadcrumb
             inAppIncludes += c.inAppIncludes; inAppExcludes += c.inAppExcludes; attachStacktrace = c.attachStacktrace
             sendDefaultPii = c.sendDefaultPii; enableAnrTracking = c.enableAnrTracking; anrTimeoutMs = c.anrTimeoutMs
+            enableExitInfoTracking = c.enableExitInfoTracking
             enableNativeCrashHandling = c.enableNativeCrashHandling; enableUserInteractionTracing = c.enableUserInteractionTracing
             enableAppStartTracking = c.enableAppStartTracking; enableActivityTracing = c.enableActivityTracing
             enableTimeToFullDisplayTracing = c.enableTimeToFullDisplayTracing; enableFramesTracking = c.enableFramesTracking
@@ -321,6 +332,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun enableAnrTracking(v: Boolean) = apply { enableAnrTracking = v }
         fun anrTimeoutMs(v: Long) = apply { anrTimeoutMs = v.coerceAtLeast(1000) }
         fun enableNativeCrashHandling(v: Boolean) = apply { enableNativeCrashHandling = v }
+        fun enableExitInfoTracking(v: Boolean) = apply { enableExitInfoTracking = v }
         fun enableUserInteractionTracing(v: Boolean) = apply { enableUserInteractionTracing = v }
         fun enableAppStartTracking(v: Boolean) = apply { enableAppStartTracking = v }
         fun enableActivityTracing(v: Boolean) = apply { enableActivityTracing = v }

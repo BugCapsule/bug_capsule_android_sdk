@@ -38,6 +38,18 @@ class NativeCrashesTest {
         assertEquals(0x7a1b2c3d4eL, r.frames[0].pc)
         assertEquals("crash_here", r.frames[0].symbol)
         assertNull(r.frames[1].symbol)
+        assertNull("no scope mirrored yet", r.scope)
+    }
+
+    @Test
+    fun parsesTheMirroredScopeAndIgnoresABrokenOne() {
+        val withScope = record.replace("abi arm64-v8a\n", "abi arm64-v8a\nscope {\"user\":{\"id\":\"u_1\"}, \"tags\":{\"screen\":\"cart\"}}\n")
+        val r = NativeCrashRecord.parse(withScope)!!
+        assertEquals("u_1", (r.scope!!["user"] as Map<*, *>)["id"])
+        assertEquals(3, r.frames.size)
+        val broken = NativeCrashRecord.parse(record.replace("abi arm64-v8a\n", "abi arm64-v8a\nscope {\"user\":{\"id\n"))!!
+        assertNull(broken.scope)
+        assertEquals(11, broken.signal)
     }
 
     @Test
@@ -53,7 +65,8 @@ class NativeCrashesTest {
     fun becomesASignalEventWithElfImages() {
         val ev = LinkedHashMap<String, Any?>()
         NativeCrashes.fill(ev, NativeCrashRecord.parse(record)!!, "com.shop") { path ->
-            if (path.endsWith("libshop.so")) "11223344-5566-7788-99aa-bbccddeeff00" else null
+            // libc has a build id too, but is a system library: no image for it.
+            if (path.endsWith("libshop.so")) "11223344-5566-7788-99aa-bbccddeeff00" else "aabbccdd-0000-0000-0000-000000000000"
         }
         val value = J.obj(J.list(J.obj(ev["exception"])!!["values"])!![0])!!
         assertEquals("SIGSEGV", value["type"])
@@ -69,9 +82,9 @@ class NativeCrashesTest {
         )
         assertEquals(true, frames.last()["inApp"])
         assertEquals(false, frames.first()["inApp"])
-        assertEquals("unresolvable image keeps its load address", "0x7f00000000", frames.first()["imageAddr"])
+        assertEquals("every frame names its image", "0x7f00000000", frames.first()["imageAddr"])
         val images = J.list(ev["debugImages"])!!.map { J.obj(it)!! }
-        assertEquals(1, images.size)
+        assertEquals(listOf("/data/app/~~x/com.shop-1/lib/arm64/libshop.so"), images.map { it["codeFile"] })
         assertEquals("elf", images[0]["type"])
         assertEquals("arm64", images[0]["arch"])
         assertEquals("0x7a1b200000", images[0]["imageAddr"])

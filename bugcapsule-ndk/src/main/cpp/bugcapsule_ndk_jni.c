@@ -26,6 +26,21 @@ Java_dev_bugcapsule_ndk_BugCapsuleNdk_nativeUninstall(JNIEnv *env, jclass clazz)
     bc_ndk_uninstall();
 }
 
+JNIEXPORT jboolean JNICALL
+Java_dev_bugcapsule_ndk_BugCapsuleNdk_nativeSetScope(JNIEnv *env, jclass clazz, jbyteArray json) {
+    jsize len;
+    jbyte *bytes;
+    int ok;
+    (void) clazz;
+    if (json == NULL) return JNI_FALSE;
+    len = (*env)->GetArrayLength(env, json);
+    bytes = (*env)->GetPrimitiveArrayCritical(env, json, NULL);
+    if (bytes == NULL) return JNI_FALSE;
+    ok = bc_ndk_set_scope((const char *) bytes, (size_t) len);
+    (*env)->ReleasePrimitiveArrayCritical(env, json, bytes, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL
 Java_dev_bugcapsule_ndk_BugCapsuleNdk_nativeCrash(JNIEnv *env, jclass clazz, jint kind) {
     (void) env;

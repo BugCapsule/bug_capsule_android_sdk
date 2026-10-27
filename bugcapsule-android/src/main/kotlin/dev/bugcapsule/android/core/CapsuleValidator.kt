@@ -171,7 +171,7 @@ object CapsuleValidator {
         int(session, "seed", "$mp.session")
         int(session, "durationMs", "$mp.session")
 
-        optObj(m, "failure", mp)?.let { validateFailure(it, "$mp.failure") }
+        optObj(m, "failure", mp)?.let { validateFailure(it, "$mp.failure", specVersion) }
         optObj(m, "monitoring", mp)?.let {
             optString(it, "eventId", "$mp.monitoring", max = 100)
             optString(it, "traceId", "$mp.monitoring", max = 100)
@@ -205,6 +205,7 @@ object CapsuleValidator {
         optObj(m, "stats", mp)?.let { stats ->
             optInt(stats, "eventCount", "$mp.stats", min = 0)
             optInt(stats, "droppedEvents", "$mp.stats", min = 0)
+            optInt(stats, "journalGapMs", "$mp.stats")
             if (stats["checkpointKind"] != null) enum(stats, "checkpointKind", "$mp.stats", listOf("launch", "periodic"))
         }
 
@@ -391,8 +392,14 @@ object CapsuleValidator {
         }
     }
 
-    private fun validateFailure(f: Map<String, Any?>, path: String) {
-        enum(f, "kind", path, listOf("exception", "assertion", "manual"))
+    private fun validateFailure(f: Map<String, Any?>, path: String, specVersion: Long) {
+        // crash-capsules §3: `crash` is a capsule format v2 kind.
+        enum(f, "kind", path, if (specVersion >= 2) listOf("exception", "assertion", "manual", "crash") else listOf("exception", "assertion", "manual"))
+        optObj(f, "crash", path)?.let { crash ->
+            optString(crash, "mechanism", "$path.crash", max = 50)
+            optInt(crash, "signal", "$path.crash")
+            optString(crash, "inAppFrame", "$path.crash", max = 1000)
+        }
         string(f, "signature", path, max = 1000)
         string(f, "type", path, max = 1000, min = 0)
         optString(f, "message", path, max = 10000)
