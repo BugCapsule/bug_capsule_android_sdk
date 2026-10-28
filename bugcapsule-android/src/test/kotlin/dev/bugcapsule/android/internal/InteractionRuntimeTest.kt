@@ -110,6 +110,24 @@ class InteractionRuntimeTest {
     }
 
     @Test
+    fun remoteMaxInteractionPayloadBytesLowersThePerPayloadLimit() {
+        start(true)
+        transport.configs.add(ConfigFetchResult.Fetched(FakeTransport.config().copy(maxInteractionPayloadBytes = 8)))
+        BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
+        getProfile(mapOf("uid" to "u1"), mapOf("name" to "Sam Example", "visits" to 3))
+        BugCapsule.fail("boom")
+        val capsule = CapsuleCodec.decode(awaitCapture().readBytes())
+        val result = InteractionPayload.fromJson(capsule.events.single { it.type == "native.result" }.data["value"] as Map<String, Any?>)
+        assertEquals(PayloadMode.TRUNCATED, result.mode)
+        assertTrue(capsule.dependency("acme.profile")!!.gaps.any { it.code == DependencyGaps.PAYLOAD_TRUNCATED })
+
+        val parsed = RemoteCaptureConfig.fromJson(mapOf("maxInteractionPayloadBytes" to 1_000_000L))
+        assertEquals(64 * 1024, parsed.maxInteractionPayloadBytes)
+        assertEquals(parsed, RemoteCaptureConfig.fromJson(parsed.toJson()))
+        assertEquals(null, RemoteCaptureConfig.fromJson(emptyMap()).maxInteractionPayloadBytes)
+    }
+
+    @Test
     fun disabledAdaptersStopOneAdapterWithoutTouchingHttp() {
         start(true)
         BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)

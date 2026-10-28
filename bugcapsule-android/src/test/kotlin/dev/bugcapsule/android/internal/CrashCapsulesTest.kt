@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.internal
 
 import dev.bugcapsule.android.core.CapsuleCodec
+import dev.bugcapsule.android.core.CapsuleLimits
 import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.Checkpoint
 import dev.bugcapsule.android.core.CheckpointKind
@@ -138,6 +139,19 @@ class CrashCapsulesTest {
         assertEquals("abc123", m.gitSha)
         assertEquals(listOf("okhttp"), m.integrations)
         assertEquals("android", m.runtimeName)
+    }
+
+    @Test
+    fun aFullSetOfAppLabelsLeavesRoomForTheCrashLabels() {
+        val full = header().also { h -> h["labels"] = (0 until CapsuleLimits.MAX_LABELS).associate { "k$it" to "v$it" } }
+        val built = build(journalDir(listOf(launch), (1L..2L).map { event(it) }, header = full))
+        assertTrue("the crash capsule is kept", built != null)
+        val labels = CapsuleCodec.decode(built!!.bytes).manifest.labels
+        assertEquals(CapsuleLimits.MAX_LABELS, labels.size)
+        assertEquals("crash_journal", labels["source"])
+        assertEquals("signal", labels["crash.mechanism"])
+        assertEquals("v97", labels["k97"])
+        assertFalse(labels.containsKey("k98"))
     }
 
     @Test

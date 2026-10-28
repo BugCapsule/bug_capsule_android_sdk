@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Apply the project's `maxInteractionPayloadBytes` capture setting to every interaction adapter (`RemoteCaptureConfig.maxInteractionPayloadBytes`).
+- Crash capsules keep at most 98 app labels, so the two crash labels fit and an app with 99 or more labels no longer loses its crash capsule to validation.
+
 ## 0.4.1-beta.5 — 2026-10-27
 
 - Crash capsules: a recording session keeps a crash journal (`journal/<pid>/` in the SDK's storage: header, checkpoints, events; one background writer, flushed every 250 ms, at most `2 × maxCapsuleBytes`). The next launch builds a capsule (format v2, failure kind `crash`, gap `crash.native`, `labels.source = crash_journal`, `stats.journalGapMs`) for a native crash, an ANR kill or a foreground low-memory kill of that process, queues it and links it to the crash's event (`capsuleId`, `manifest.monitoring`). Crash capsules do not count against `maxCapsulesPerSession`. An ANR the watchdog already reported gets a capsule linked to that event.

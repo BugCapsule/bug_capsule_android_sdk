@@ -27,6 +27,7 @@ import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.core.FlightRecorder
 import dev.bugcapsule.android.core.Ids
+import dev.bugcapsule.android.core.InteractionLimits
 import dev.bugcapsule.android.core.InteractionRecorder
 import dev.bugcapsule.android.core.InteractionTypes
 import dev.bugcapsule.android.core.J
@@ -404,6 +405,7 @@ internal class Runtime(
         currentRedactor = baseRedactor(cached?.redactKeys ?: emptyList())
         captureBodies = config.captureNetworkBodies && (cached?.captureNetworkBodies ?: true)
         maxCapsuleBytes = cached?.maxCapsuleBytes ?: maxCapsuleBytes
+        interactionRecorder.limits = interactionLimits(cached)
         val record = decideRecording(cached)
         // Before the previous processes' crashes are reported: a journal left with this pid is theirs.
         val journalDir = if (record) CrashCapsules.prepare(File(s.root, CrashCapsules.DIR), android.os.Process.myPid()) else null
@@ -1289,6 +1291,7 @@ internal class Runtime(
             }
         }
         if (dropDisabledAdapters(previous, next)) rewritten = true
+        interactionRecorder.limits = interactionLimits(next)
         captureBodies = bodies
         if (currentRedactor.extraKeys != (config.redactKeys + next.redactKeys).distinct()) {
             rewritten = true
@@ -1339,6 +1342,10 @@ internal class Runtime(
         interactionRecorder.recorders().firstOrNull { it.descriptor.id == dep }
             ?.gap(DependencyGaps.EVENTS_DROPPED, "buffered events dropped (redaction rules or adapter disabled remotely)")
     }
+
+    /** Remote `maxInteractionPayloadBytes` (capsule-v2 §7) lowers the per-payload limit of every adapter. */
+    private fun interactionLimits(remote: RemoteCaptureConfig?) =
+        InteractionLimits().lowered(maxPayloadBytes = remote?.maxInteractionPayloadBytes)
 
     /** Remote `disabledAdapters` (capsule-v2 §7): newly disabled adapters lose their buffered events; HTTP is untouched. */
     /** True when buffered events were dropped. */
