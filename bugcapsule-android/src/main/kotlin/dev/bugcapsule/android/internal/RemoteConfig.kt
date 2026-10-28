@@ -30,6 +30,11 @@ data class RemoteCaptureConfig(
      * that stop capturing; HTTP capture is unaffected.
      */
     val disabledAdapters: List<String> = emptyList(),
+    /**
+     * capsule-v2 §7: lowers the per-payload interaction limit (encoded JSON
+     * bytes, at most 64 KiB). Null when the backend did not send it.
+     */
+    val maxInteractionPayloadBytes: Int? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf(
         "enabled" to enabled,
@@ -46,6 +51,7 @@ data class RemoteCaptureConfig(
         "maxBreadcrumbs" to maxBreadcrumbs,
         "tracePropagationTargets" to tracePropagationTargets,
         "disabledAdapters" to disabledAdapters,
+        "maxInteractionPayloadBytes" to maxInteractionPayloadBytes,
     )
 
     companion object {
@@ -78,6 +84,7 @@ data class RemoteCaptureConfig(
                 maxBreadcrumbs = field("maxBreadcrumbs", Long::class.javaObjectType)?.coerceIn(0, 100)?.toInt(),
                 tracePropagationTargets = field("tracePropagationTargets", List::class.java)?.map { it.toString() },
                 disabledAdapters = (field("disabledAdapters", List::class.java) ?: emptyList<Any?>()).map { it.toString() }.take(100),
+                maxInteractionPayloadBytes = field("maxInteractionPayloadBytes", Long::class.javaObjectType)?.coerceIn(0, 64L * 1024)?.toInt(),
             )
         }
     }
