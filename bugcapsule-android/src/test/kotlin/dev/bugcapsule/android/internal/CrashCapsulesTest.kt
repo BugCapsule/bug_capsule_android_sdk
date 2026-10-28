@@ -176,11 +176,13 @@ class CrashCapsulesTest {
 
     @Test
     fun anOversizeCapsuleFallsBackToTheNewestPeriodicCheckpointThenToNothing() {
-        val big = "x".repeat(20_000)
+        val random = java.util.Random(42)
+        val big = (1..20_000).map { (33 + random.nextInt(90)).toChar() }.joinToString("")
         val events = (1L..6L).map { event(it, data = mapOf("id" to "tap$it", "note" to if (it <= 4) big + it else "small")) }
         val dir = journalDir(listOf(launch, periodic(4)), events)
         val full = build(dir)!!
-        val smaller = build(dir, max = full.bytes.size - 1L)!!
+        // Leave room for random capsule IDs to change the compressed size.
+        val smaller = build(dir, max = full.bytes.size / 2L)!!
         val capsule = CapsuleCodec.decode(smaller.bytes)
         assertEquals(CheckpointKind.PERIODIC, capsule.checkpoint.kind)
         assertEquals(listOf(5L, 6L), capsule.events.map { it.seq })
