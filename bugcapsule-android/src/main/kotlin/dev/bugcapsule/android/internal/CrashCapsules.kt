@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.internal
 
 import dev.bugcapsule.android.core.CapsuleCodec
+import dev.bugcapsule.android.core.CapsuleLimits
 import dev.bugcapsule.android.core.CapsuleDependency
 import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.CapsuleValidator
@@ -240,7 +241,12 @@ internal object CrashCapsules {
             eligibility.missing("integration.eligibility", "eligibility check failed: $e")
         }
 
-        val labels = LinkedHashMap<String, Any?>(J.obj(h["labels"]) ?: emptyMap())
+        // The app's labels give up two slots for the crash labels, so the capsule stays within MAX_LABELS.
+        val labels = LinkedHashMap<String, Any?>()
+        (J.obj(h["labels"]) ?: emptyMap()).entries
+            .filter { it.key != "source" && it.key != "crash.mechanism" }
+            .take(CapsuleLimits.MAX_LABELS - 2)
+            .forEach { labels[it.key] = it.value }
         labels["source"] = "crash_journal"
         labels["crash.mechanism"] = crash.mechanism
         val stats = linkedMapOf<String, Any?>(
