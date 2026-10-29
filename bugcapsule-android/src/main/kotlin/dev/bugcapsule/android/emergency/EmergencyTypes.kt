@@ -148,6 +148,12 @@ class EmergencyDecision internal constructor(
     /** True only for [EmergencyAction.USE_SAFE_FALLBACK] with a [fallback]. */
     val fallbackAvailable: Boolean,
     val source: EmergencyDecisionSource,
+    /**
+     * Severity of the deciding policy (`P0`…), or null. Not a decision field
+     * of the contract: [EmergencyUpdateRequest.from] uses it to tell urgent
+     * `REQUIRE_UPDATE` decisions apart.
+     */
+    val severity: String? = null,
 ) {
     /** The snake_case decision fields of the contract (without `source`), for logs and the shared vectors. */
     internal fun toWire(): Map<String, Any?> = linkedMapOf(

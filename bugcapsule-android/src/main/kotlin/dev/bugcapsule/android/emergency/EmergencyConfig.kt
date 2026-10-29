@@ -45,6 +45,9 @@ class EmergencyConfig private constructor(b: Builder) {
     /** App version used for version targeting; null: the configured BugCapsule app version, else the package's `versionName`. */
     val appVersion: String? = b.appVersion
 
+    /** Brings store updates for `REQUIRE_UPDATE` decisions ([BugCapsuleEmergency.updates]); null: none. */
+    val updateProvider: EmergencyUpdateProvider? = b.updateProvider
+
     class Builder internal constructor() {
         internal var trustAnchor: String? = null
         internal var environment = DEFAULT_ENVIRONMENT
@@ -53,6 +56,7 @@ class EmergencyConfig private constructor(b: Builder) {
         internal var token: String? = null
         internal var backend: BugCapsuleBackendConfig? = null
         internal var appVersion: String? = null
+        internal var updateProvider: EmergencyUpdateProvider? = null
 
         /** Required: the `bcek.v1.…` trust anchor from the dashboard. */
         fun trustAnchor(v: String?) = apply { trustAnchor = v?.trim() }
@@ -91,6 +95,21 @@ class EmergencyConfig private constructor(b: Builder) {
 
         /** App version for version targeting (defaults to the BugCapsule app version, else the package's `versionName`). */
         fun appVersion(v: String?) = apply { appVersion = v?.takeIf { it.isNotBlank() } }
+
+        /**
+         * The update provider behind [BugCapsuleEmergency.updates], e.g.
+         * `PlayEmergencyUpdateProvider` from `bugcapsule-android-play`. Apps
+         * distributed outside Google Play implement [EmergencyUpdateProvider]
+         * themselves.
+         * @throws IllegalArgumentException when its name does not match `^[a-z][a-z0-9_]{0,31}$`.
+         */
+        fun updateProvider(v: EmergencyUpdateProvider?) = apply {
+            if (v != null) {
+                val name = v.provider
+                require(RuntimeReport.PROVIDER.matches(name)) { "update provider name \"$name\" must match ^[a-z][a-z0-9_]{0,31}$" }
+            }
+            updateProvider = v
+        }
 
         fun build() = EmergencyConfig(this)
     }
