@@ -49,6 +49,7 @@ Keep them on the same version.
 | `bugcapsule-compose` | Compose helpers: actions, tracked text, navigation, screen tracing, feedback sheet |
 | `bugcapsule-ndk` | Native (NDK) crash reporting (optional) |
 | `bugcapsule-sqlite` | SQLite / Room query spans (optional) |
+| `bugcapsule-android-play` | Google Play In-App Updates for emergency `REQUIRE_UPDATE` decisions (optional, Play-distributed apps only; see [its README](bugcapsule-android-play/README.md)) |
 | `bugcapsule-android-replay` | **Test only**: the replay runner the CLI uses (androidTest), and `NativeAdapterConformance` for your adapters' unit tests |
 | Gradle plugin `io.github.bugcapsule.gradle` | Uploads R8/ProGuard mappings so stack traces from minified builds are readable (optional) |
 
@@ -70,6 +71,7 @@ dependencies {
     implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.6")   // if you use Compose
     implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.6")       // optional: native crashes
     implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.6")    // optional: SQLite / Room spans
+    implementation("io.github.bugcapsule:bugcapsule-android-play:0.4.1-beta.6") // optional: Play in-app updates for REQUIRE_UPDATE
     androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.6")
 }
 ```
@@ -553,13 +555,47 @@ if (!decision.allowed) {
 **A client guard is UX only.** A modified or offline app can skip it. Your
 server must enforce the same restriction for anything that moves money or data.
 
+### Store updates for `REQUIRE_UPDATE`
+
+`BugCapsule.emergency.updates` takes the user to the build a `REQUIRE_UPDATE`
+decision asks for, through an `EmergencyUpdateProvider`:
+
+```kotlin
+BugCapsule.emergency.initialize(this, EmergencyConfig.builder()
+    .trustAnchor(BuildConfig.BUGCAPSULE_EMERGENCY_ANCHOR)
+    .updateProvider(PlayEmergencyUpdateProvider.builder(this).build())   // bugcapsule-android-play
+    .build())
+
+if (decision.action == EmergencyAction.REQUIRE_UPDATE) {
+    BugCapsule.emergency.updates.startUpdate(activity, decision)
+}
+```
+
+- `checkForUpdate(decision, callback)`, `startUpdate(activity, decision)`,
+  `resumeUpdate(activity)` (from `onResume`), `completeUpdate()`, `status()`
+  and `addListener(EmergencyUpdateListener { status -> … })`. Callbacks and
+  listeners run on the main thread.
+- `bugcapsule-android-play` uses Google Play In-App Updates: the flexible
+  flow by default, the immediate flow only when you opt in with
+  `allowImmediateUpdates(true)`, the decision has severity `P0` or `P1` and
+  Play allows it. A downloaded flexible update is installed only when you call
+  `completeUpdate()`. Details: [its README](bugcapsule-android-play/README.md).
+- Apps distributed outside Google Play implement `EmergencyUpdateProvider`
+  themselves (for example, open the store page and report `OPENED_STORE`).
+  The SDK never installs a package.
+- Each status change is sent to the backend as a runtime report (provider,
+  flow, state, available and required version): never the same one twice in
+  a row, at most one every 60 s, nothing while a capsule is replayed.
+  `APPLIED` and `FAILED` receipts carry the latest one too.
+
 Platform limits in this release:
 
 - No code push. A policy can only gate code that already ships in the app.
 - Guard decisions are not recorded into capsules yet. While a capsule is
   replayed, every key is allowed (`source = REPLAY`) and nothing is fetched.
-- `REQUIRE_UPDATE` only tells the app which version to require. Google Play
-  in-app updates will be added in a later release.
+- Store updates need a provider: `bugcapsule-android-play` for Google Play,
+  your own `EmergencyUpdateProvider` otherwise. Without one, `REQUIRE_UPDATE`
+  only tells the app which version to require.
 
 ## Going to production
 

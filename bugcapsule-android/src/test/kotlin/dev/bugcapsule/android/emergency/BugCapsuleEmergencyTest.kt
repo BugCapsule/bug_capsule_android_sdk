@@ -241,4 +241,154 @@ class BugCapsuleEmergencyTest {
             .failureMode("checkout.view", EmergencyFailureMode.FAIL_OPEN).build().failureModes
         assertEquals(2, modes.size)
     }
+
+    // ---------------------------------------------------------------- updates
+
+    /** A store-page provider, as an app distributed outside Google Play would write it. */
+    private class StorePageProvider(override val provider: String = "custom_store") : EmergencyUpdateProvider {
+        @Volatile
+        var sink: EmergencyUpdateListener? = null
+        val started = CopyOnWriteArrayList<EmergencyUpdateRequest>()
+
+        override fun checkAvailability(request: EmergencyUpdateRequest, callback: EmergencyUpdateCallback) {
+            callback.onResult(
+                EmergencyUpdateAvailability(
+                    true, setOf(EmergencyUpdateFlow.STORE_PAGE), EmergencyUpdateFlow.STORE_PAGE, "2.4.2", request.requiredVersion,
+                ),
+            )
+            emit(EmergencyUpdateState.AVAILABLE, request.requiredVersion)
+        }
+
+        override fun startUpdate(activity: Activity, request: EmergencyUpdateRequest) {
+            started += request
+            emit(EmergencyUpdateState.OPENED_STORE, request.requiredVersion)
+        }
+
+        override fun resumeUpdate(activity: Activity) {}
+
+        override fun completeUpdate() = false
+
+        override fun setListener(listener: EmergencyUpdateListener?) {
+            sink = listener
+        }
+
+        fun emit(state: EmergencyUpdateState, required: String?) =
+            sink?.onUpdateStatusChanged(EmergencyUpdateStatus(provider, EmergencyUpdateFlow.STORE_PAGE, state, "2.4.2", required))
+    }
+
+    private fun awaitReceipts(t: FakeTransport, status: String, count: Int): List<Map<String, Any?>> {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (t.receipts.count { it["status"] == status } < count && System.currentTimeMillis() < deadline) Thread.sleep(20)
+        return t.receipts.filter { it["status"] == status }
+    }
+
+    @Test
+    fun updatesWithoutAProviderAnswerNotAvailable() {
+        val updates = BugCapsule.emergency.updates
+        assertFalse(updates.isConfigured)
+        assertNull(updates.providerName)
+        val seen = CopyOnWriteArrayList<Pair<EmergencyUpdateAvailability, Boolean>>()
+        updates.checkForUpdate(EmergencyUpdateRequest("2.4.2")) { seen += it to (Looper.myLooper() == Looper.getMainLooper()) }
+        idleMain()
+        assertEquals(1, seen.size)
+        assertFalse(seen[0].first.available)
+        assertEquals("2.4.2", seen[0].first.requiredVersion)
+        assertEquals(EmergencyUpdates.NO_PROVIDER, seen[0].first.error)
+        assertTrue("on the main thread", seen[0].second)
+        updates.startUpdate(Robolectric.buildActivity(Activity::class.java).setup().get(), EmergencyUpdateRequest())
+        assertFalse(updates.completeUpdate())
+        assertNull(updates.status())
+    }
+
+    @Test
+    fun providerStatusReachesListenersOnTheMainThreadAndRuntimeReports() {
+        val t = FakeTransport()
+        val p = StorePageProvider()
+        val seen = CopyOnWriteArrayList<Pair<EmergencyUpdateStatus, Boolean>>()
+        BugCapsule.emergency.updates.addListener { s -> seen += s to (Looper.myLooper() == Looper.getMainLooper()) }
+        BugCapsule.emergency.updates.addListener { throw IllegalStateException("a broken listener") }
+        BugCapsule.emergency.testHooks = hooks(transport = t)
+        BugCapsule.emergency.initialize(app, config().updateProvider(p).build())
+        assertTrue(BugCapsule.emergency.updates.isConfigured)
+        assertEquals("custom_store", BugCapsule.emergency.updates.providerName)
+
+        val answers = CopyOnWriteArrayList<EmergencyUpdateAvailability>()
+        BugCapsule.emergency.updates.checkForUpdate(EmergencyUpdateRequest("2.4.2")) { answers += it }
+        idleMain()
+        assertEquals(1, answers.size)
+        assertTrue(answers[0].available)
+        assertEquals(EmergencyUpdateFlow.STORE_PAGE, answers[0].flow)
+        assertEquals(EmergencyUpdateState.AVAILABLE, seen.single().first.state)
+        assertTrue("delivered on the main thread", seen.single().second)
+        assertEquals(EmergencyUpdateState.AVAILABLE, BugCapsule.emergency.updates.status()?.state)
+
+        val r = awaitReceipts(t, "RUNTIME", 1)
+        assertEquals(1, r.size)
+        assertEquals(
+            mapOf(
+                "update" to mapOf(
+                    "provider" to "custom_store", "flow" to "store_page", "state" to "available",
+                    "availableVersion" to "2.4.2", "requiredVersion" to "2.4.2",
+                ),
+            ),
+            r[0]["runtime"],
+        )
+        assertEquals(0L, r[0]["revision"])
+        assertNull(r[0]["errorCode"])
+    }
+
+    @Test
+    fun resetDetachesTheProviderAndANewInitializeReattachesIt() {
+        val t = FakeTransport()
+        val p = StorePageProvider()
+        BugCapsule.emergency.testHooks = hooks(transport = t)
+        BugCapsule.emergency.initialize(app, config().updateProvider(p).build())
+        BugCapsule.emergency.resetForTest()
+        assertNull("detached on reset", p.sink)
+
+        BugCapsule.emergency.testHooks = hooks(transport = t)
+        BugCapsule.emergency.initialize(app, config().updateProvider(p).build())
+        p.emit(EmergencyUpdateState.OPENED_STORE, null)
+        assertEquals(1, awaitReceipts(t, "RUNTIME", 1).size)
+    }
+
+    @Test
+    fun aRequireUpdateDecisionBecomesAnUrgentRequest() {
+        val t = FakeTransport()
+        val rule = policy(action = "REQUIRE_UPDATE").toMutableMap().apply { put("required_version", "2.4.2+57") }
+        t.ok(signer.envelope(document(42, listOf(rule))))
+        val p = StorePageProvider()
+        BugCapsule.emergency.testHooks = hooks(transport = t)
+        BugCapsule.emergency.initialize(app, config().updateProvider(p).build())
+        BugCapsule.emergency.refreshPolicies().get(10, TimeUnit.SECONDS)
+        val decision = BugCapsule.emergency.evaluate("checkout.confirm_order")
+        assertEquals(EmergencyAction.REQUIRE_UPDATE, decision.action)
+        assertEquals("P0", decision.severity)
+        assertEquals("2.4.2+57", decision.requiredVersion)
+
+        BugCapsule.emergency.updates.startUpdate(Robolectric.buildActivity(Activity::class.java).setup().get(), decision)
+        val request = p.started.single()
+        assertTrue(request.isUrgent)
+        assertEquals("2.4.2+57", request.requiredVersion)
+        assertEquals(EmergencyUpdateState.OPENED_STORE, BugCapsule.emergency.updates.status()?.state)
+        val r = awaitReceipts(t, "RUNTIME", 1)
+        assertEquals("the accepted revision", 42L, r.single()["revision"])
+
+        assertFalse(EmergencyUpdateRequest("1.0", EmergencyAction.REQUIRE_UPDATE, "P2").isUrgent)
+        assertFalse(EmergencyUpdateRequest("1.0", EmergencyAction.BLOCK, "P0").isUrgent)
+        assertTrue(EmergencyUpdateRequest("1.0", EmergencyAction.REQUIRE_UPDATE, "P1").isUrgent)
+        assertNull("no policy, no severity", BugCapsule.emergency.evaluate("search.query").severity)
+    }
+
+    @Test
+    fun theProviderNameIsValidated() {
+        for (bad in listOf("Google", "", "1play", "play-store", "p".repeat(33))) {
+            try {
+                EmergencyConfig.builder().updateProvider(StorePageProvider(bad))
+                fail("provider \"$bad\" accepted")
+            } catch (_: IllegalArgumentException) {
+            }
+        }
+        assertEquals("custom_store", EmergencyConfig.builder().updateProvider(StorePageProvider()).build().updateProvider?.provider)
+    }
 }
