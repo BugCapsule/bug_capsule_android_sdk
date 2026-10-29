@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Emergency recovery (feature guards): `BugCapsule.emergency` fetches the project's signed policy document (ECDSA P-256, verified against the `bcek.v1.…` trust anchor in `EmergencyConfig`), caches it under the SDK's storage and evaluates `evaluate("checkout.confirm_order")` synchronously on the device: `ALLOW`, `BLOCK`, `READ_ONLY`, `REQUIRE_UPDATE`, `SHOW_MAINTENANCE`, `DISABLE_FEATURE` or `USE_SAFE_FALLBACK`, with the decision's `source`. Per-key failure modes (`FAIL_OPEN` by default, `FAIL_CLOSED`, `USE_LAST_VALID_POLICY`), anti-replay of older revisions, refresh every 60 s in the foreground with backoff and `Retry-After`, `If-None-Match`, receipts, listeners on the main thread and `status()`. It works without capture, and while a capsule is replayed every key is allowed and nothing is fetched. A client guard is UX only: the server must enforce the same restriction. Implements emergency-client-v1 (`docs/emergency-client-v1.md`, vectors in `spec-fixtures/emergency-v1`).
+
 ## 0.4.1-beta.6 — 2026-10-28
 
 - Apply the project's `maxInteractionPayloadBytes` capture setting to every interaction adapter (`RemoteCaptureConfig.maxInteractionPayloadBytes`).

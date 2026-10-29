@@ -29,6 +29,7 @@ Kotlin-first, with a Java-friendly API.
 - [Replay, verify and keep a regression test](#replay-verify-and-keep-a-regression-test)
 - [Monitoring](#monitoring)
 - [Privacy](#privacy)
+- [Emergency recovery (feature guards)](#emergency-recovery-feature-guards)
 - [Going to production](#going-to-production)
 - [Limitations](#limitations)
 - [Demo app](#demo-app)
@@ -500,6 +501,65 @@ Redaction is best effort. It does **not** find secrets in URL path segments,
 personal data that isn't a credential, or secrets in binary bodies. Inspect
 real capsules with `bugcapsule inspect` before a wider rollout. More:
 [Privacy and redaction](https://docs.bugcapsule.com/privacy.html).
+
+## Emergency recovery (feature guards)
+
+Emergency policies let you switch a named feature off, or into a safe mode,
+from the dashboard without a release: `BLOCK`, `READ_ONLY`, `REQUIRE_UPDATE`,
+`SHOW_MAINTENANCE`, `DISABLE_FEATURE` or `USE_SAFE_FALLBACK`. The backend
+signs one document of policies per environment (ECDSA P-256). The SDK
+verifies it against a trust anchor compiled into your app, caches it, and
+evaluates it on the device. Nothing executable is downloaded: a policy only
+says whether a feature may run and what to show instead.
+
+```kotlin
+// Application.onCreate, after BugCapsule.init (whose connection it reuses)
+BugCapsule.emergency.initialize(this, EmergencyConfig.builder()
+    .trustAnchor(BuildConfig.BUGCAPSULE_EMERGENCY_ANCHOR)       // bcek.v1.… from the dashboard
+    .environment("production")                                  // default
+    .failureMode("checkout.*", EmergencyFailureMode.FAIL_CLOSED) // everything else: FAIL_OPEN
+    .build())
+
+// Anywhere, any thread: synchronous, in memory, never throws
+val decision = BugCapsule.emergency.evaluate("checkout.confirm_order")
+if (!decision.allowed) {
+    showBlocked(decision.action, decision.publicUserMessage)
+    return
+}
+```
+
+- `evaluate(key, EmergencyContext(subject))` uses your own stable,
+  pseudonymous user id for partial rollouts. The default subject is a random
+  installation id. Never pass an email address or other personal data.
+- `isFeatureAllowed(key)`, `getPolicy(key)`, `refreshPolicies()` (a
+  `Future<EmergencyStatus>`), `status()`, and
+  `addListener(EmergencyListener { snapshot -> … })` (called on the main thread).
+- The document is fetched at startup, every 60 s while the app is in the
+  foreground (`refreshIntervalMs`, at least 15 s) and when the app returns to
+  the foreground. No timers run in the background. Startup never waits for the
+  network: a cached document is verified again and used straight away.
+- With no usable document (never fetched, or expired more than 5 minutes ago),
+  each key gets its failure mode: `FAIL_OPEN` (the default, allow),
+  `FAIL_CLOSED` (block; use it for actions that move money) or
+  `USE_LAST_VALID_POLICY` (keep using the expired document). `decision.source`
+  says which one applied (`POLICY`, `STALE_POLICY`, `FAILURE_MODE`, `REPLAY`).
+- Emergency policies don't depend on capture. They work when capture is
+  disabled or sampled out, and the capture kill switch doesn't turn them off.
+  Pass `.token(…)` or `.backend(url, ingestKey)` to use them without
+  `BugCapsule.init`.
+- An invalid trust anchor turns emergency policies off: every key uses its
+  failure mode and `status().trustAnchorValid` is false.
+
+**A client guard is UX only.** A modified or offline app can skip it. Your
+server must enforce the same restriction for anything that moves money or data.
+
+Platform limits in this release:
+
+- No code push. A policy can only gate code that already ships in the app.
+- Guard decisions are not recorded into capsules yet. While a capsule is
+  replayed, every key is allowed (`source = REPLAY`) and nothing is fetched.
+- `REQUIRE_UPDATE` only tells the app which version to require. Google Play
+  in-app updates will be added in a later release.
 
 ## Going to production
 

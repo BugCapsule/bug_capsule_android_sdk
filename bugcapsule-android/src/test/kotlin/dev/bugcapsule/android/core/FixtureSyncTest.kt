@@ -24,8 +24,10 @@ class FixtureSyncTest {
         assertTrue(File(SpecFixtures.dir, "conformance/interactions.json").isFile)
         assertTrue(File(SpecFixtures.dir, "conformance/request-keys.json").isFile)
         assertTrue(File(SpecFixtures.dir, "connection-token-v1/vectors.json").isFile)
+        assertTrue(File(SpecFixtures.dir, "emergency-v1/envelopes.json").isFile)
     }
 
+    /** emergency-v1 is not compared: its source of truth is the backend's generator, not the Flutter SDK. */
     @Test
     fun vendoredFixturesMatchUpstream() {
         assumeTrue("upstream fixtures not checked out", SpecFixtures.upstream.isDirectory)
