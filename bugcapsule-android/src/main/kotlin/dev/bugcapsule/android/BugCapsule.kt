@@ -8,6 +8,7 @@ import dev.bugcapsule.android.core.CaptureMode
 import dev.bugcapsule.android.core.Eligibility
 import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
+import dev.bugcapsule.android.emergency.BugCapsuleEmergency
 import dev.bugcapsule.android.internal.ActionRegistry
 import dev.bugcapsule.android.internal.BugCapsuleTestOverrides
 import dev.bugcapsule.android.internal.ConnectionResolver
@@ -166,6 +167,19 @@ object BugCapsule {
     /** The running session (for integrations); null before [init]. */
     @JvmStatic
     val session: BugCapsuleSession? get() = runtime
+
+    /**
+     * Emergency recovery: remote, signed feature guards. Independent of
+     * capture; call [BugCapsuleEmergency.initialize] to use it.
+     */
+    @JvmStatic
+    val emergency: BugCapsuleEmergency = BugCapsuleEmergency()
+
+    /** The backend [init] resolved (emergency policies reuse it when they have no connection of their own). */
+    internal fun emergencyBackend(): BugCapsuleBackendConfig? = runtime?.config?.backend
+
+    /** The app version set in [BugCapsuleConfig], if any. */
+    internal fun configuredAppVersion(): String? = runtime?.config?.appVersion
 
     // ---------------------------------------------------------------- hooks
 
@@ -560,6 +574,7 @@ object BugCapsule {
         runtime = null
         connection = null
         actions.clear()
+        emergency.resetForTest()
         dev.bugcapsule.android.replay.BugCapsuleReplay.resetForTest()
     }
 
