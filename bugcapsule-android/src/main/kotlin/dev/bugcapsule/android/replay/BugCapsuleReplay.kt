@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.ApplicationInfo
 import dev.bugcapsule.android.core.Capsule
 import dev.bugcapsule.android.core.CapsuleFormatException
+import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.Divergence
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
@@ -13,6 +14,8 @@ import dev.bugcapsule.android.core.ReplayProtocol
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.ReplaySettings
 import dev.bugcapsule.android.core.ReplayStrategy
+import dev.bugcapsule.android.emergency.EmergencyDecision
+import dev.bugcapsule.android.emergency.EmergencyDecisionScript
 import dev.bugcapsule.android.internal.SdkLog
 import dev.bugcapsule.android.storage.EarlyRestore
 import java.util.concurrent.CountDownLatch
@@ -45,6 +48,14 @@ object BugCapsuleReplay {
     ) {
         /** Reporter used by the engine: HTTP POST first, then the status fallback line. */
         val reporter: ReplayReporter = ReplayReporter { report -> deliver(channel, sink, report) }
+
+        private val emergencyDecisions by lazy { EmergencyDecisionScript(capsule.events) }
+
+        /** For a guard evaluated before the engine exists: the replay clock has not started, so it stands at the checkpoint. */
+        internal fun emergencyDecision(key: String, subjectTag: String?): EmergencyDecision? {
+            val start = if (capsule.checkpoint.kind == CheckpointKind.LAUNCH) 0 else capsule.checkpoint.t
+            return emergencyDecisions.lookup(key, subjectTag, start)
+        }
     }
 
     @Volatile

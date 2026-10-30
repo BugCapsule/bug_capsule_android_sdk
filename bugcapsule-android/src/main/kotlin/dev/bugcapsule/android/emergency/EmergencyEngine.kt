@@ -48,6 +48,8 @@ internal class EmergencyEngine(
     private val nowMs: () -> Long,
     private val random: Random,
     private val replaying: () -> Boolean,
+    /** The decision of a feature key and subject while [replaying]. */
+    private val replayed: (String, String?) -> EmergencyDecision = { key, _ -> EmergencyContract.replayAllowed(key) },
     private val appVersion: () -> String?,
     private val sdkVersion: String,
     /** Called on [executor] after the snapshot changed (the facade hops to the main thread). */
@@ -156,7 +158,7 @@ internal class EmergencyEngine(
     // ----------------------------------------------------------- evaluation
 
     fun evaluate(featureKey: String, context: EmergencyContext?): EmergencyDecision {
-        if (replaying()) return EmergencyContract.fixed(featureKey, EmergencyAction.ALLOW, null, EmergencyDecisionSource.REPLAY)
+        if (replaying()) return replayed(featureKey, context?.subject)
         val doc = current.document
         val now = nowMs()
         if (doc != null && now <= doc.expiresAtMs + EmergencyContract.GRACE_MS) {

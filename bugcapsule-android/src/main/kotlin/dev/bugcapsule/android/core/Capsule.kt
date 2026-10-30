@@ -52,6 +52,12 @@ object EventTypes {
      */
     const val KEY = "key"
 
+    /**
+     * A remote guard decision (emergency-client-v1 §7.8), served back to the
+     * guard during replay. Readers that do not know it ignore it.
+     */
+    const val EMERGENCY_DECISION = "emergency.decision"
+
     /** Types the replay engine dispatches back into the app. */
     val REPLAYABLE = setOf(LIFECYCLE, POINTER, ACTION, TEXT, KEY)
 }

@@ -66,4 +66,16 @@ class RecorderTest {
         assertFalse(idle.maySkip(now = 3400, idleSince = 3000, busy = 1, quietMs = 400))
         assertFalse(idle.maySkip(now = 3100, idleSince = 3000, busy = 0, quietMs = 400))
     }
+
+    @Test
+    fun guardDecisionsDoNotEndAnIdleStretch() {
+        val input = 300_000L
+        val quiet = listOf(CapsuleEvent(1, 1000, "log"), CapsuleEvent(2, input, "pointer"))
+        val rewrites = (1L..9L).map { i ->
+            CapsuleEvent(1 + i, i * 30_000, EventTypes.EMERGENCY_DECISION, mapOf("key" to "checkout.pay", "action" to "BLOCK"))
+        }
+        val withDecisions = listOf(quiet[0]) + rewrites + quiet[1].copy(seq = 11)
+        assertEquals(1000L, IdleCompressor(quiet).idleSince(1000, input))
+        assertEquals(1000L, IdleCompressor(withDecisions).idleSince(1000, input))
+    }
 }

@@ -9,6 +9,7 @@ import dev.bugcapsule.android.core.Eligibility
 import dev.bugcapsule.android.core.EventTypes
 import dev.bugcapsule.android.core.FailureRecord
 import dev.bugcapsule.android.emergency.BugCapsuleEmergency
+import dev.bugcapsule.android.emergency.EmergencyDecision
 import dev.bugcapsule.android.internal.ActionRegistry
 import dev.bugcapsule.android.internal.BugCapsuleTestOverrides
 import dev.bugcapsule.android.internal.ConnectionResolver
@@ -30,6 +31,7 @@ import dev.bugcapsule.android.monitoring.SpanStatus
 import dev.bugcapsule.android.monitoring.TraceContext
 import dev.bugcapsule.android.monitoring.Transaction
 import dev.bugcapsule.android.monitoring.User
+import dev.bugcapsule.android.replay.BugCapsuleReplay
 import java.io.File
 import java.util.Random
 import java.util.concurrent.FutureTask
@@ -180,6 +182,23 @@ object BugCapsule {
 
     /** The app version set in [BugCapsuleConfig], if any. */
     internal fun configuredAppVersion(): String? = runtime?.config?.appVersion
+
+    /** Writes a changed guard decision into the recording, if there is one. */
+    internal fun recordEmergencyDecision(data: Map<String, Any?>) {
+        runtime?.recordDecision(data)
+    }
+
+    /** The capsule's decision for [featureKey] now; null when it has none. */
+    internal fun replayedEmergencyDecision(featureKey: String, subjectTag: String?): EmergencyDecision? {
+        val engine = runtime?.engine
+        if (engine != null) return engine.emergencyDecision(featureKey, subjectTag)
+        return BugCapsuleReplay.armed()?.emergencyDecision(featureKey, subjectTag)
+    }
+
+    /** [BugCapsuleEmergency] can no longer say that capsules hold every decision. */
+    internal fun emergencyDecisionsIncomplete() {
+        runtime?.onDecisionsIncomplete()
+    }
 
     // ---------------------------------------------------------------- hooks
 
