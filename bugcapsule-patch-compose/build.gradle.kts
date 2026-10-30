@@ -15,6 +15,8 @@ android {
 }
 
 dependencies {
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
     api(project(":bugcapsule-patch"))
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.foundation)

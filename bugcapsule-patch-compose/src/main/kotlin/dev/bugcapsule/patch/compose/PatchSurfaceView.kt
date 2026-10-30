@@ -1,5 +1,6 @@
 package dev.bugcapsule.patch.compose
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,8 +17,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
 import dev.bugcapsule.patch.BugCapsulePatch
 import org.json.JSONObject
@@ -34,12 +34,31 @@ fun PatchSurfaceView(
     onTextChanged: (action: String, id: String, value: String) -> Unit = { _, _, _ -> },
     bundled: @Composable () -> Unit,
 ) {
-    val doc = patch.surface(id)
-    if (doc == null) bundled() else Node(doc.getJSONObject("root"), actions, onTextChanged)
+    PatchSurfaceView(patch, id, actions, emptyMap(), onTextChanged, bundled)
+}
+
+/**
+ * [images] maps registered asset IDs to images supplied by the app. The renderer
+ * never decodes patch bytes or loads URLs. If any referenced image is missing,
+ * the entire [bundled] surface is shown, including its actions.
+ */
+@Composable
+fun PatchSurfaceView(
+    patch: BugCapsulePatch,
+    id: String,
+    actions: Map<String, () -> Unit>,
+    images: Map<String, ImageBitmap>,
+    onTextChanged: (action: String, id: String, value: String) -> Unit = { _, _, _ -> },
+    bundled: @Composable () -> Unit,
+) {
+    val root = patch.surface(id)?.optJSONObject("root")
+    val suppliedImages = images.toMap()
+    if (root == null || !surfaceImagesAvailable(root, suppliedImages.keys)) bundled()
+    else Node(root, actions, suppliedImages, onTextChanged)
 }
 
 @Composable
-private fun Node(n: JSONObject, actions: Map<String, () -> Unit>, onText: (String, String, String) -> Unit) {
+private fun Node(n: JSONObject, actions: Map<String, () -> Unit>, images: Map<String, ImageBitmap>, onText: (String, String, String) -> Unit) {
     val spacing = n.optInt("spacing", 0).dp
     val kids = n.optJSONArray("children")?.let { a -> List(a.length()) { a.getJSONObject(it) } }.orEmpty()
     when (n.getString("type")) {
@@ -51,7 +70,7 @@ private fun Node(n: JSONObject, actions: Map<String, () -> Unit>, onText: (Strin
                 else -> MaterialTheme.typography.bodyMedium
             },
         )
-        "image" -> Spacer(Modifier.semantics { contentDescription = n.getString("label") })
+        "image" -> Image(bitmap = images.getValue(n.getString("asset")), contentDescription = n.getString("label"))
         "spacer" -> Spacer(Modifier.size(n.getInt("size").dp))
         "button" -> Button(onClick = actions[n.getString("action")] ?: {}) { Text(n.getString("label")) }
         "text_field" -> {
@@ -65,8 +84,8 @@ private fun Node(n: JSONObject, actions: Map<String, () -> Unit>, onText: (Strin
                 label = { Text(n.getString("label")) },
             )
         }
-        "row" -> Row(horizontalArrangement = Arrangement.spacedBy(spacing)) { kids.forEach { Node(it, actions, onText) } }
-        "list" -> LazyColumn(verticalArrangement = Arrangement.spacedBy(spacing)) { items(kids.size) { Node(kids[it], actions, onText) } }
-        else -> Column(verticalArrangement = Arrangement.spacedBy(spacing)) { kids.forEach { Node(it, actions, onText) } }
+        "row" -> Row(horizontalArrangement = Arrangement.spacedBy(spacing)) { kids.forEach { Node(it, actions, images, onText) } }
+        "list" -> LazyColumn(verticalArrangement = Arrangement.spacedBy(spacing)) { items(kids.size) { Node(kids[it], actions, images, onText) } }
+        else -> Column(verticalArrangement = Arrangement.spacedBy(spacing)) { kids.forEach { Node(it, actions, images, onText) } }
     }
 }
