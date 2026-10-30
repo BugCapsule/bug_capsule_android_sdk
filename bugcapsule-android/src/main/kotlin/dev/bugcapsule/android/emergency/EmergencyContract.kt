@@ -163,6 +163,7 @@ internal object EmergencyContract {
             fallback = w.fallback,
             fallbackAvailable = w.action == EmergencyAction.USE_SAFE_FALLBACK && w.fallback != null,
             source = source,
+            severity = w.severity,
         )
     }
 

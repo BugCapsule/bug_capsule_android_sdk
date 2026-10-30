@@ -47,6 +47,9 @@ import java.util.concurrent.TimeUnit
  * only improves the user's experience: your server must enforce the same
  * restriction for anything that moves money or data.
  *
+ * [updates] brings a newer store build for `REQUIRE_UPDATE` decisions through
+ * an [EmergencyUpdateProvider] (Google Play: `bugcapsule-android-play`).
+ *
  * Evaluation is synchronous, in memory and thread-safe, and never throws.
  * Before [initialize], without a usable document, or with an invalid trust
  * anchor, each key gets its [EmergencyFailureMode] (`FAIL_OPEN` by default).
@@ -74,6 +77,12 @@ class BugCapsuleEmergency internal constructor() {
     @Volatile
     internal var testHooks: EmergencyTestHooks? = null
 
+    /**
+     * Store updates for `REQUIRE_UPDATE` decisions, through the provider set
+     * with [EmergencyConfig.Builder.updateProvider] (emergency-client-v1 §7.7).
+     */
+    val updates: EmergencyUpdates = EmergencyUpdates()
+
     /** True after [initialize] succeeded. */
     val isInitialized: Boolean get() = engine != null
 
@@ -91,6 +100,7 @@ class BugCapsuleEmergency internal constructor() {
             return
         }
         failureModes = config.failureModes
+        updates.attach(config.updateProvider, testHooks?.deliver)
         try {
             setup(context, config)
             setupError = null
@@ -174,6 +184,7 @@ class BugCapsuleEmergency internal constructor() {
         )
         e.start()
         engine = e
+        updates.connect(e::reportRuntime)
         val t = ForegroundTracker(e, foreground)
         app.registerActivityLifecycleCallbacks(t)
         application = app
@@ -279,6 +290,7 @@ class BugCapsuleEmergency internal constructor() {
         engine?.dispose()
         tracker?.let { application?.unregisterActivityLifecycleCallbacks(it) }
         ownedExecutor?.shutdownNow()
+        updates.detach()
         engine = null
         tracker = null
         application = null
