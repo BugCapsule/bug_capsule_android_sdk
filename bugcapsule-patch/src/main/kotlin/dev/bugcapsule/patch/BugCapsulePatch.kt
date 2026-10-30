@@ -67,10 +67,24 @@ data class PatchReplay(val bundlePath: String? = null, val keyringPath: String? 
  */
 class BugCapsulePatch private constructor(
     private var handle: Long,
-    /** Why this build runs fallbacks only; null when the runtime is up. */
-    val unavailableReason: String?,
+    unavailableReason: String?,
 ) {
+    /** Why this build runs fallbacks only; null when the runtime is up. */
+    var unavailableReason: String? = unavailableReason
+        private set
+
     val available: Boolean get() = handle != 0L
+
+    /**
+     * Moves this handle onto [pinned], so everything already holding it runs
+     * the replay pin and nothing keeps the live store.
+     */
+    internal fun adoptReplay(pinned: BugCapsulePatch) {
+        close()
+        handle = pinned.handle
+        unavailableReason = pinned.unavailableReason
+        pinned.handle = 0
+    }
 
     /** Runs the patched module when there is one, else the bundled fallback. Never throws for a patch failure. */
     fun <I, O> call(module: PatchModule<I, O>, input: I, timeoutMs: Long = 50): PatchResult<O> {

@@ -8,6 +8,9 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Timer
+import java.util.TimerTask
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Refusal from the delivery endpoint, or a response outside its bounds. */
 class PatchHttpException(val reason: String, val status: Int? = null) : IOException("$reason${status?.let { ", HTTP $it" } ?: ""}")
@@ -28,7 +31,10 @@ class HttpPatchTransport(
     private val distributionProfile: String,
     private val baseBuildId: String,
     private val installationId: String,
+    /** Absolute limit of a channel or receipt request, reading included. */
     private val timeoutMs: Int = 30_000,
+    /** Absolute limit of an artifact download, reading included. */
+    private val artifactTimeoutMs: Int = 120_000,
 ) : PatchTransport {
     init {
         val u = URL(baseUrl)
@@ -40,16 +46,46 @@ class HttpPatchTransport(
         return URL("${baseUrl.trimEnd('/')}/v1/apps/${URLEncoder.encode(applicationId, "UTF-8")}/patches$path${if (q.isEmpty()) "" else "?$q"}")
     }
 
-    private fun open(u: URL, method: String): HttpURLConnection = (u.openConnection() as HttpURLConnection).apply {
-        requestMethod = method
-        instanceFollowRedirects = false
-        connectTimeout = timeoutMs
-        readTimeout = timeoutMs
-        setRequestProperty("Authorization", "Bearer $deliveryToken")
+    /**
+     * Runs one request under an absolute deadline. A watchdog disconnects at
+     * the deadline, so a trickled body can't outlive it, and nothing reads a
+     * body it won't use: disconnecting closes the socket either way.
+     */
+    private fun <T> bounded(u: URL, method: String, limitMs: Int, run: (HttpURLConnection) -> T): T {
+        val c = (u.openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            instanceFollowRedirects = false
+            connectTimeout = limitMs
+            readTimeout = limitMs
+            setRequestProperty("Authorization", "Bearer $deliveryToken")
+        }
+        val expired = AtomicBoolean(false)
+        val watchdog = Timer("bcpatch-http", true)
+        watchdog.schedule(
+            object : TimerTask() {
+                override fun run() {
+                    expired.set(true)
+                    c.disconnect()
+                }
+            },
+            limitMs.toLong(),
+        )
+        try {
+            return run(c)
+        } catch (e: PatchHttpException) {
+            throw e
+        } catch (e: IOException) {
+            throw if (expired.get()) PatchHttpException("timed_out") else e
+        } finally {
+            watchdog.cancel()
+            c.disconnect()
+        }
     }
 
     private fun read(c: HttpURLConnection, max: Int): ByteArray {
-        if (c.contentLengthLong > max) throw PatchHttpException("response_too_large", c.responseCode)
+        // contentLengthLong needs API 24; a length past Int also goes through here.
+        val declared = c.getHeaderField("Content-Length")?.toLongOrNull()
+        if (declared != null && declared > max) throw PatchHttpException("response_too_large", c.responseCode)
         val out = ByteArrayOutputStream(minOf(max, 64 * 1024))
         c.inputStream.use { input ->
             val buf = ByteArray(16 * 1024)
@@ -76,26 +112,25 @@ class HttpPatchTransport(
     )
 
     override fun fetchChannel(etag: String?): SignedChannel? {
-        val c = open(url("/channel", mapOf("platform" to platform, "distributionProfile" to distributionProfile, "baseBuildId" to baseBuildId)), "GET")
-        try {
+        val u = url("/channel", mapOf("platform" to platform, "distributionProfile" to distributionProfile, "baseBuildId" to baseBuildId))
+        return bounded(u, "GET", timeoutMs) { c ->
             if (etag != null) c.setRequestProperty("If-None-Match", etag)
             when (val status = c.responseCode) {
-                204, 304 -> return null
-                200 -> {}
+                204, 304 -> null
+                200 -> {
+                    val j = JSONObject(String(read(c, MAX_CHANNEL_BYTES), Charsets.UTF_8))
+                    val channel = j.getJSONObject("channel")
+                    val keyring = j.optJSONObject("keyring")
+                    SignedChannel(
+                        decode(channel.getString("document")),
+                        decode(channel.getString("signature")),
+                        c.getHeaderField("ETag"),
+                        keyring?.let { decode(it.getString("document")) },
+                        keyring?.let { decode(it.getString("signature")) },
+                    )
+                }
                 else -> throw refused(status)
             }
-            val j = JSONObject(String(read(c, MAX_CHANNEL_BYTES), Charsets.UTF_8))
-            val channel = j.getJSONObject("channel")
-            val keyring = j.optJSONObject("keyring")
-            return SignedChannel(
-                decode(channel.getString("document")),
-                decode(channel.getString("signature")),
-                c.getHeaderField("ETag"),
-                keyring?.let { decode(it.getString("document")) },
-                keyring?.let { decode(it.getString("signature")) },
-            )
-        } finally {
-            c.disconnect()
         }
     }
 
@@ -107,13 +142,10 @@ class HttpPatchTransport(
 
     override fun fetchArtifact(digest: String): ByteArray {
         if (!DIGEST.matches(digest)) throw PatchHttpException("bad_digest")
-        val c = open(url("/artifacts/$digest"), "GET")
-        try {
+        return bounded(url("/artifacts/$digest"), "GET", artifactTimeoutMs) { c ->
             val status = c.responseCode
             if (status != 200) throw refused(status)
-            return read(c, MAX_ARTIFACT_BYTES)
-        } finally {
-            c.disconnect()
+            read(c, MAX_ARTIFACT_BYTES)
         }
     }
 
@@ -137,16 +169,13 @@ class HttpPatchTransport(
             .put("receipts", receipts)
             .toString()
             .toByteArray(Charsets.UTF_8)
-        val c = open(url("/receipts"), "POST")
-        try {
+        bounded(url("/receipts"), "POST", timeoutMs) { c ->
             c.doOutput = true
             c.setFixedLengthStreamingMode(body.size)
             c.setRequestProperty("Content-Type", "application/json")
             c.outputStream.use { it.write(body) }
             val code = c.responseCode
             if (code != 202) throw refused(code)
-        } finally {
-            c.disconnect()
         }
     }
 

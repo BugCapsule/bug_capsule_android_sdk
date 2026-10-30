@@ -1448,6 +1448,8 @@ internal class Runtime(
 
     // ---------------------------------------------------------------- replay
 
+    private val PATCH_FETCH_TIMEOUT_MS = 30_000L
+
     /** What this process runs. Read once: a process pins one generation. */
     private val patchIdentityOnce = lazy {
         try {
@@ -1467,22 +1469,35 @@ internal class Runtime(
         val settings = armed.settings
         patchPinned = true
         if (binding != null) {
+            val fetched = arrayOfNulls<ByteArray>(3)
             var failure: Throwable? = null
             // The replay channel uses sockets, which the main thread may not.
+            // This thread only fetches: a late result is ignored, so an attempt
+            // refused on timeout can never change what the process runs.
             val fetch = Thread {
                 try {
-                    val bundle = if (settings.patchArtifact) armed.channel.fetchPatchFile(ReplayProtocol.PATCH_PATH) else null
-                    val keyring = if (settings.patchKeyring) armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_PATH) else null
-                    val signature = if (settings.patchKeyring) armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_SIGNATURE_PATH) else null
-                    pinnedPatch = binding.pinForReplay(bundle, keyring, signature)
+                    if (settings.patchArtifact) fetched[0] = armed.channel.fetchPatchFile(ReplayProtocol.PATCH_PATH)
+                    if (settings.patchKeyring) {
+                        fetched[1] = armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_PATH)
+                        fetched[2] = armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_SIGNATURE_PATH)
+                    }
                 } catch (t: Throwable) {
                     failure = t
                 }
             }
+            fetch.isDaemon = true
             fetch.start()
-            fetch.join(30_000)
-            if (fetch.isAlive) return "patch.unavailable: timed out loading the pinned artifact"
+            fetch.join(PATCH_FETCH_TIMEOUT_MS)
+            if (fetch.isAlive) {
+                fetch.interrupt()
+                return "patch.unavailable: timed out loading the pinned artifact"
+            }
             failure?.let { return "patch.unavailable: $it" }
+            try {
+                pinnedPatch = binding.pinForReplay(fetched[0], fetched[1], fetched[2])
+            } catch (t: Throwable) {
+                return "patch.unavailable: $t"
+            }
         }
         return patchPreflight(armed.capsule.manifest, settings, binding != null, pinnedPatch)
     }

@@ -3,7 +3,7 @@ package dev.bugcapsule.patch
 import dev.bugcapsule.android.core.PatchBinding
 import dev.bugcapsule.android.core.PatchIdentity
 import java.io.File
-import java.nio.file.Files
+import java.util.UUID
 
 /**
  * Opens the runtime for BugCapsule: normally from the device store, and in a
@@ -40,12 +40,13 @@ class BugCapsulePatchBinding(
     @Synchronized
     override fun pinForReplay(bundle: ByteArray?, keyring: ByteArray?, keyringSignature: ByteArray?): PatchIdentity? {
         require((keyring == null) == (keyringSignature == null)) { "a keyring needs its signature" }
-        val dir = Files.createTempDirectory("bcpatch-replay").toFile()
+        val dir = File("${config.storeDir}-replay-${UUID.randomUUID()}").apply { mkdirs() }
         fun write(name: String, bytes: ByteArray?) = bytes?.let { File(dir, name).apply { writeBytes(it) }.path }
         val replay = PatchReplay(write("artifact.bcpatch", bundle), write("keyring.json", keyring), write("keyring.sig", keyringSignature))
         val p = BugCapsulePatch.open(config, modules, surfaces, replay)
         check(p.available) { "the pinned artifact was refused: ${p.unavailableReason}" }
-        opened = p
-        return identityOf(p)
+        val handle = opened
+        if (handle == null) opened = p else handle.adoptReplay(p)
+        return identityOf(opened!!)
     }
 }

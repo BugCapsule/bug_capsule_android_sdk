@@ -29,8 +29,10 @@ class PatchIdentityTest {
         dependencies = listOfNotNull(patch?.takeIf { it.patchSetDigest != null }?.dependency),
     )
 
-    private fun check(captured: PatchIdentity?, running: PatchIdentity?, artifact: Boolean = false, expected: String? = null, binding: Boolean = true) =
-        patchPreflight(manifest(captured), ReplaySettings(patchArtifact = artifact, expectedPatchSetDigest = expected), binding, running)
+    private fun check(captured: PatchIdentity?, running: PatchIdentity?, artifact: Boolean = false, expected: String? = null, binding: Boolean = true, kind: String = "replay", deps: List<CapsuleDependency>? = null): String? {
+        val m = manifest(captured).let { if (deps != null) it.copy(dependencies = deps) else it }
+        return patchPreflight(m, ReplaySettings(patchArtifact = artifact, expectedPatchSetDigest = expected, kind = kind), binding, running)
+    }
 
     @Test fun identityRoundTrips() {
         val i = id(patch = digest).copy(artifactDigest = digest)
@@ -53,11 +55,25 @@ class PatchIdentityTest {
     @Test fun wrongBaseAbiOrDigestIsIncompatible() {
         assertTrue(check(id(), id(base = "x"))!!.startsWith("patch.base"))
         assertTrue(check(id(), id(abi = 2))!!.startsWith("patch.abi"))
-        assertTrue(check(id(), id(patch = hash), artifact = true, expected = digest)!!.startsWith("patch.mismatch"))
+        assertTrue(check(id(), id(patch = hash), artifact = true, expected = digest, kind = "verify")!!.startsWith("patch.mismatch"))
     }
 
     @Test fun aFixRunOfTheExactDigestPasses() {
-        assertNull(check(id(), id(patch = digest), artifact = true, expected = digest))
+        assertNull(check(id(), id(patch = digest), artifact = true, expected = digest, kind = "verify"))
         assertNull(check(id(patch = digest), id(patch = digest), artifact = true, expected = digest))
+    }
+
+    @Test fun aBaselineMustRunTheCapturedDigest() {
+        assertTrue(check(id(patch = digest), id(patch = hash), artifact = true, expected = hash)!!.startsWith("patch.mismatch"))
+        assertTrue(check(id(), id(patch = digest), artifact = true, expected = digest)!!.startsWith("patch.mismatch"))
+        assertTrue(check(null, id(patch = digest), artifact = true, expected = digest)!!.startsWith("patch.mismatch"))
+        assertNull(check(id(patch = digest), id(patch = hash), artifact = true, expected = hash, kind = "verify"))
+    }
+
+    @Test fun aRequiredRuntimeIsValidatedNotSkipped() {
+        val good = id(patch = digest).dependency
+        assertTrue(check(id(patch = digest), id(patch = digest), artifact = true, expected = digest, deps = listOf(good.copy(adapter = "x.y")))!!.startsWith("dependency.unsupported"))
+        assertTrue(check(id(patch = digest), id(patch = digest), artifact = true, expected = digest, deps = listOf(good.copy(schema = 2)))!!.startsWith("dependency.schema"))
+        assertTrue(check(null, id(), deps = listOf(good))!!.startsWith("patch.identity_missing"))
     }
 }

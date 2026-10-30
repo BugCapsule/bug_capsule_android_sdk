@@ -26,7 +26,7 @@ class HttpTransportTest {
 
     @Before fun setUp() {
         server = MockWebServer().apply { start() }
-        t = HttpPatchTransport(server.url("/").toString().trimEnd('/').replace("localhost", "127.0.0.1"), "bcpd_secret", "com.shop", "android", "internal", "build-1", "install-1", 3_000)
+        t = HttpPatchTransport(server.url("/").toString().trimEnd('/').replace("localhost", "127.0.0.1"), "bcpd_secret", "com.shop", "android", "internal", "build-1", "install-1", 2_000, 2_000)
     }
 
     @After fun tearDown() = server.shutdown()
@@ -63,6 +63,20 @@ class HttpTransportTest {
     @Test fun undeclaredOversizeStopsAtTheLimit() {
         server.enqueue(MockResponse().setChunkedBody(Buffer().write(ByteArray(HttpPatchTransport.MAX_ARTIFACT_BYTES + 1)), 1 shl 20))
         assertEquals("response_too_large", reason { t.fetchArtifact(digest) })
+    }
+
+    @Test fun aTrickledBodyCannotOutliveTheAbsoluteDeadline() {
+        server.enqueue(MockResponse().setBody(Buffer().write(ByteArray(1 shl 20))).throttleBody(1024, 100, java.util.concurrent.TimeUnit.MILLISECONDS))
+        val start = System.nanoTime()
+        assertEquals("timed_out", reason { t.fetchArtifact(digest) })
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 4_000)
+    }
+
+    @Test fun anErrorBodyIsNeverRead() {
+        server.enqueue(MockResponse().setResponseCode(500).setBody(Buffer().write(ByteArray(1 shl 20))).throttleBody(1024, 100, java.util.concurrent.TimeUnit.MILLISECONDS))
+        val start = System.nanoTime()
+        assertEquals("http_error", reason { t.fetchArtifact(digest) })
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 1_500)
     }
 
     @Test fun redirectsAreNotFollowed() {
