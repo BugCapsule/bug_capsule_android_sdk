@@ -54,8 +54,12 @@ import java.util.concurrent.TimeUnit
  * Before [initialize], without a usable document, or with an invalid trust
  * anchor, each key gets its [EmergencyFailureMode] (`FAIL_OPEN` by default).
  * Emergency policies are independent of capture: they work when capture is
- * disabled, and the remote capture kill switch does not turn them off. While
- * BugCapsule replays a capsule nothing is fetched and every key is allowed.
+ * disabled, and the remote capture kill switch does not turn them off.
+ *
+ * Decisions are recorded into capsules when they change. While BugCapsule
+ * replays a capsule nothing is fetched, and each key gets the decision the app
+ * saw at that point of the capture, or ALLOW when the capsule has none for it
+ * (emergency-client-v1 §7.8).
  */
 class BugCapsuleEmergency internal constructor() {
     @Volatile
@@ -72,6 +76,7 @@ class BugCapsuleEmergency internal constructor() {
     private var tracker: ForegroundTracker? = null
     private var ownedExecutor: ScheduledThreadPoolExecutor? = null
     private val warnedKeys = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val decisions = EmergencyDecisionTracker(onIncomplete = { BugCapsule.emergencyDecisionsIncomplete() })
 
     /** Test hook: storage, transport, clock, threads. */
     @Volatile
@@ -147,7 +152,7 @@ class BugCapsuleEmergency internal constructor() {
         }
         val debuggable = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         val replaying: () -> Boolean = hooks?.replaying ?: {
-            BugCapsule.isReplaying || (debuggable && (BugCapsuleReplay.isArmed() || BugCapsuleReplay.isPostMortem()))
+            BugCapsule.isReplaying || (debuggable && armedForReplay())
         }
         val executor: ExecutorService = hooks?.executor ?: ScheduledThreadPoolExecutor(1, ThreadFactory { r ->
             Thread(r, "BugCapsule-Emergency").apply { isDaemon = true }
@@ -177,6 +182,7 @@ class BugCapsuleEmergency internal constructor() {
             nowMs = hooks?.nowMs ?: System::currentTimeMillis,
             random = hooks?.random ?: Random(),
             replaying = replaying,
+            replayed = ::replayed,
             appVersion = { config.appVersion ?: BugCapsule.configuredAppVersion() ?: packageVersion },
             sdkVersion = BuildConfig.SDK_VERSION,
             onSnapshot = { snapshot -> notifyListeners(snapshot, deliver) },
@@ -184,7 +190,7 @@ class BugCapsuleEmergency internal constructor() {
         )
         e.start()
         engine = e
-        updates.connect(e::reportRuntime)
+        updates.connect(e::reportRuntime, replaying)
         val t = ForegroundTracker(e, foreground)
         app.registerActivityLifecycleCallbacks(t)
         application = app
@@ -212,16 +218,58 @@ class BugCapsuleEmergency internal constructor() {
      */
     @JvmOverloads
     fun evaluate(featureKey: String, context: EmergencyContext? = null): EmergencyDecision {
+        val decision = decide(featureKey, context)
+        if (decision.source != EmergencyDecisionSource.REPLAY) track(decision, context?.subject)
+        return decision
+    }
+
+    private fun decide(featureKey: String, context: EmergencyContext?): EmergencyDecision {
         try {
             if (!EmergencyContract.isFeatureKey(featureKey) && warnedKeys.add(featureKey)) {
                 SdkLog.w("emergency: \"$featureKey\" is not a feature key (lower-case dotted, e.g. checkout.confirm_order)")
             }
             engine?.let { return it.evaluate(featureKey, context) }
-            if (BugCapsule.isReplaying) return EmergencyContract.fixed(featureKey, EmergencyAction.ALLOW, null, EmergencyDecisionSource.REPLAY)
+            // Without initialize there is no Application to read the flag from, but arming refuses a non-debuggable app.
+            if (BugCapsule.isReplaying || armedForReplay()) return replayed(featureKey, context?.subject)
         } catch (e: Throwable) {
             SdkLog.w("emergency evaluation failed; using the failure mode: $e")
         }
         return failureModeDecision(featureKey)
+    }
+
+    /** What the app saw during capture, or ALLOW when the capsule doesn't say (§7.8). */
+    private fun replayed(featureKey: String, subject: String?): EmergencyDecision {
+        try {
+            val tag = subject?.let(decisions::tagOf)
+            BugCapsule.replayedEmergencyDecision(featureKey, tag)?.let { return it }
+        } catch (e: Throwable) {
+            SdkLog.once("could not replay an emergency decision: $e")
+        }
+        return EmergencyContract.replayAllowed(featureKey)
+    }
+
+    /** Never affects the decision: a failure here only costs the recording. */
+    private fun track(decision: EmergencyDecision, subject: String?) {
+        try {
+            decisions.track(decision, subject, BugCapsule::recordEmergencyDecision)
+        } catch (e: Throwable) {
+            SdkLog.once("could not record an emergency decision: $e")
+        }
+    }
+
+    /** False once a decision could not be recorded (§7.8). */
+    internal val decisionsComplete: Boolean get() = decisions.complete
+
+    /** The app's `beforeRecord` hook dropped a decision. */
+    internal fun decisionDropped() = decisions.markIncomplete()
+
+    /** Writes each decision known now: when recording starts, and after a periodic checkpoint. */
+    internal fun writeTrackedDecisions() {
+        try {
+            decisions.writeAll(BugCapsule::recordEmergencyDecision)
+        } catch (e: Throwable) {
+            SdkLog.once("could not record the emergency decisions: $e")
+        }
     }
 
     private fun failureModeDecision(featureKey: String): EmergencyDecision {
@@ -299,6 +347,7 @@ class BugCapsuleEmergency internal constructor() {
         setupError = null
         listeners.clear()
         warnedKeys.clear()
+        decisions.clear()
         testHooks = null
     }
 
@@ -333,6 +382,8 @@ class BugCapsuleEmergency internal constructor() {
     }
 
     private companion object {
+        fun armedForReplay() = BugCapsuleReplay.isArmed() || BugCapsuleReplay.isPostMortem()
+
         fun isProcessForeground(): Boolean = try {
             val info = ActivityManager.RunningAppProcessInfo()
             ActivityManager.getMyMemoryState(info)

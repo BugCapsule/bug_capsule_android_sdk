@@ -19,9 +19,10 @@ import java.util.concurrent.CopyOnWriteArrayList
  * ```
  *
  * Callbacks and listeners run on the main thread. Every status change is
- * also sent to the backend as a runtime report (emergency-client-v1 §7.6),
- * except while BugCapsule replays a capsule. Without a provider a check
- * answers "not available" and the other calls do nothing.
+ * also sent to the backend as a runtime report (emergency-client-v1 §7.6).
+ * Without a provider, or while BugCapsule replays a capsule (a replayed
+ * `REQUIRE_UPDATE` decision must not reach the store), a check answers "not
+ * available" and the other calls do nothing.
  */
 class EmergencyUpdates internal constructor() {
     @Volatile
@@ -36,6 +37,12 @@ class EmergencyUpdates internal constructor() {
     /** Receives each valid runtime object; set by [connect] once the engine runs. */
     @Volatile
     private var runtimeSink: ((Map<String, Any?>) -> Unit)? = null
+
+    @Volatile
+    private var replaying: () -> Boolean = { false }
+
+    /** The provider to call: none during a replay. */
+    private val active: EmergencyUpdateProvider? get() = if (replaying()) null else provider
 
     private val listeners = CopyOnWriteArrayList<EmergencyUpdateListener>()
     private val warned = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -62,7 +69,7 @@ class EmergencyUpdates internal constructor() {
                 },
             )
         }
-        val p = provider
+        val p = active
         if (p == null) {
             main(EmergencyUpdateAvailability(false, requiredVersion = request.requiredVersion, error = NO_PROVIDER))
             return
@@ -85,6 +92,7 @@ class EmergencyUpdates internal constructor() {
      * decisions when the app opted in); follow it with [addListener].
      */
     fun startUpdate(activity: Activity, request: EmergencyUpdateRequest) {
+        if (replaying()) return
         val p = provider ?: return warnOnce("emergency: startUpdate without an update provider; set EmergencyConfig.updateProvider(…)")
         try {
             p.startUpdate(activity, request)
@@ -98,7 +106,7 @@ class EmergencyUpdates internal constructor() {
 
     /** Resumes a flow this process started and that was interrupted; call it from `onResume`. */
     fun resumeUpdate(activity: Activity) {
-        val p = provider ?: return
+        val p = active ?: return
         try {
             p.resumeUpdate(activity)
         } catch (e: Throwable) {
@@ -112,7 +120,7 @@ class EmergencyUpdates internal constructor() {
      * Returns false when no update is downloaded.
      */
     fun completeUpdate(): Boolean {
-        val p = provider ?: return false
+        val p = active ?: return false
         return try {
             p.completeUpdate()
         } catch (e: Throwable) {
@@ -143,7 +151,8 @@ class EmergencyUpdates internal constructor() {
     }
 
     /** Sends runtime objects to [sink] from now on, starting with the current status. */
-    internal fun connect(sink: (Map<String, Any?>) -> Unit) {
+    internal fun connect(sink: (Map<String, Any?>) -> Unit, isReplaying: () -> Boolean = { false }) {
+        replaying = isReplaying
         runtimeSink = sink
         status?.let { RuntimeReport.of(it) }?.let(sink)
     }
@@ -156,6 +165,7 @@ class EmergencyUpdates internal constructor() {
         provider = null
         status = null
         runtimeSink = null
+        replaying = { false }
         deliver = mainThread
         listeners.clear()
         warned.clear()

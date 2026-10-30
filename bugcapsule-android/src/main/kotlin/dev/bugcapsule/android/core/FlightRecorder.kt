@@ -119,6 +119,8 @@ class IdleCompressor @JvmOverloads constructor(
         if (to - from <= minGapMs) return null
         var since = from
         for (e in events) {
+            // Written after each checkpoint, so they say nothing about the app (emergency-client-v1 §7.8).
+            if (e.type == EventTypes.EMERGENCY_DECISION) continue
             val start = if (e.type == EventTypes.HTTP) e.t - (J.long(e.data["durationMs"]) ?: 0) else e.t
             if (start >= to) continue
             val end = if (e.t < to) e.t else to

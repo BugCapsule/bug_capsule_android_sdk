@@ -46,7 +46,7 @@ enum class EmergencyDecisionSource(
     /** No usable document: the key's [EmergencyFailureMode] decided. */
     FAILURE_MODE("failure_mode"),
 
-    /** BugCapsule is replaying a capsule: every feature is allowed and nothing is fetched. */
+    /** BugCapsule is replaying a capsule: the decision recorded in it, or ALLOW when it has none (§7.8). Nothing is fetched. */
     REPLAY("replay"),
 }
 
@@ -140,7 +140,7 @@ class EmergencyDecision internal constructor(
     val reasonCode: String?,
     val policyId: String?,
     val policyRevision: Long?,
-    /** Revision of the document the decision came from; null for failure-mode and replay decisions. */
+    /** Revision of the document the decision came from; null for failure-mode decisions. */
     val documentRevision: Long?,
     val publicUserMessage: String?,
     val requiredVersion: String?,
