@@ -42,8 +42,13 @@ class BugCapsulePatchBinding(
         require((keyring == null) == (keyringSignature == null)) { "a keyring needs its signature" }
         val dir = File("${config.storeDir}-replay-${UUID.randomUUID()}").apply { mkdirs() }
         fun write(name: String, bytes: ByteArray?) = bytes?.let { File(dir, name).apply { writeBytes(it) }.path }
-        val replay = PatchReplay(write("artifact.bcpatch", bundle), write("keyring.json", keyring), write("keyring.sig", keyringSignature))
-        val p = BugCapsulePatch.open(config, modules, surfaces, replay)
+        val p = try {
+            val replay = PatchReplay(write("artifact.bcpatch", bundle), write("keyring.json", keyring), write("keyring.sig", keyringSignature))
+            BugCapsulePatch.open(config, modules, surfaces, replay)
+        } finally {
+            // The runtime loads the archive at open; nothing reads these afterwards.
+            dir.deleteRecursively()
+        }
         check(p.available) { "the pinned artifact was refused: ${p.unavailableReason}" }
         val handle = opened
         if (handle == null) opened = p else handle.adoptReplay(p)

@@ -14,9 +14,11 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.bugcapsule.patch.BugCapsulePatch
+import dev.bugcapsule.patch.HttpPatchTransport
 import dev.bugcapsule.patch.PatchConfig
 import dev.bugcapsule.patch.PatchModule
 import dev.bugcapsule.patch.PatchSurfaceContract
+import dev.bugcapsule.patch.PatchUpdater
 import dev.bugcapsule.patch.compose.PatchSurfaceView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -69,16 +71,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val exchange = getExternalFilesDir(null)!!
+        // Test-only: an acceptance run points the lab at a real backend. Without
+        // this file the lab uses its file inbox. The base build id stays the binary's.
+        val remoteFile = File(exchange, "patch-config.json")
+        val remote = if (remoteFile.exists()) JSONObject(remoteFile.readText()) else null
         val patch = BugCapsulePatch.open(
             PatchConfig(
                 storeDir = File(filesDir, "bcpatch").path,
-                projectId = "demo",
+                projectId = remote?.getString("projectId") ?: "demo",
                 applicationId = packageName,
                 environment = "staging",
                 distributionProfile = "development",
                 baseBuildId = BuildConfig.BASE_BUILD_ID,
                 installationId = "device-1",
-                trustRoots = listOf(BuildConfig.TRUST_ANCHOR),
+                trustRoots = listOf(remote?.getString("trustRoot") ?: BuildConfig.TRUST_ANCHOR),
             ),
             listOf(coupon),
             listOf(summarySurface),
@@ -102,7 +108,28 @@ class MainActivity : ComponentActivity() {
             .put("running", before.opt("running"))
             .put("inbox", inbox)
             .put("status", if (patch.available) patch.status() else JSONObject.NULL)
-        File(exchange, "results.jsonl").appendText(record.toString() + "\n")
+        val results = File(exchange, "results.jsonl")
+        if (remote == null) {
+            results.appendText(record.toString() + "\n")
+        } else {
+            // Blocking network: off the main thread, as the updater requires.
+            Thread {
+                val updater = PatchUpdater(
+                    patch,
+                    HttpPatchTransport(remote.getString("baseUrl"), remote.getString("deliveryToken"), packageName, "android", "development", BuildConfig.BASE_BUILD_ID, "device-1"),
+                )
+                val r = updater.checkForUpdate()
+                val sent = try {
+                    updater.flushReceipts()
+                } catch (e: java.io.IOException) {
+                    record.put("receiptError", e.toString())
+                    -1
+                }
+                record.put("update", JSONObject().put("state", r.state.name).put("artifactDigest", r.artifactDigest ?: JSONObject.NULL).put("reason", r.reason ?: JSONObject.NULL).put("receiptsSent", sent))
+                record.put("status", patch.status())
+                results.appendText(record.toString() + "\n")
+            }.start()
+        }
         val state = before.getString("state")
         setContent {
             MaterialTheme {
