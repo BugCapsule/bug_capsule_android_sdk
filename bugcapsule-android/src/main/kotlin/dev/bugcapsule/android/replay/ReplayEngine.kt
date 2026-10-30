@@ -17,6 +17,8 @@ import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.ReplaySettings
 import dev.bugcapsule.android.core.ReplayStrategy
+import dev.bugcapsule.android.emergency.EmergencyDecision
+import dev.bugcapsule.android.emergency.EmergencyDecisionScript
 import dev.bugcapsule.android.internal.ActionRegistry
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -131,6 +133,12 @@ class ReplayEngine(
 
     /** Replay clock in recorded ms since [run] started (skipped idle time included). */
     fun elapsed(): Long = (startNs?.let { msSince(it) } ?: 0) + skippedMs.get()
+
+    private val emergencyDecisions by lazy { EmergencyDecisionScript(capsule.events) }
+
+    /** The decision the app saw at this point of the capture (emergency-client-v1 §7.8); null when the capsule has none for [key]. */
+    internal fun emergencyDecision(key: String, subjectTag: String?): EmergencyDecision? =
+        emergencyDecisions.lookup(key, subjectTag, base + elapsed())
 
     /** Clock of interaction deliveries: ms since the engine was created, skipped idle time included. */
     fun interactionClock(): Long = msSince(createdNs) + skippedMs.get()

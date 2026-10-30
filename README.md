@@ -549,6 +549,16 @@ if (!decision.allowed) {
   disabled or sampled out, and the capture kill switch doesn't turn them off.
   Pass `.token(…)` or `.backend(url, ingestKey)` to use them without
   `BugCapsule.init`.
+- While a session records, each decision goes into the capsule as an
+  `emergency.decision` event when it changes, so a replay sees what the user
+  saw. A subject is never written, only a short hash of it. The events follow
+  your capture rules, including `beforeRecord`. Dropping one, or going past
+  256 feature key and subject pairs, marks the capsule `partial` in
+  `manifest.capabilities["emergency.decisions"]`.
+- During replay `evaluate` returns the recorded decision with source `REPLAY`,
+  and ALLOW for a key the capsule doesn't have. `getPolicy` returns null,
+  nothing is fetched or reported, and update providers aren't called. A
+  candidate built with an SDK older than this replays with every key allowed.
 - An invalid trust anchor turns emergency policies off: every key uses its
   failure mode and `status().trustAnchorValid` is false.
 

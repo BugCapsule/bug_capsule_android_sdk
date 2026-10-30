@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.internal
 
 import android.content.Context
+import dev.bugcapsule.android.BugCapsule
 import dev.bugcapsule.android.BugCapsuleConfig
 import dev.bugcapsule.android.BugCapsuleIntegration
 import dev.bugcapsule.android.BugCapsuleSession
@@ -39,6 +40,7 @@ import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.RuntimeInfo
 import dev.bugcapsule.android.core.SessionInfo
+import dev.bugcapsule.android.emergency.EMERGENCY_DECISIONS_CAPABILITY
 import dev.bugcapsule.android.feedback.BugCapsuleFeedbackDialog
 import dev.bugcapsule.android.feedback.ShakeDetector
 import dev.bugcapsule.android.monitoring.AnrWatchdog
@@ -263,13 +265,7 @@ internal class Runtime(
         if (!recording && mon == null) return
         try {
             val clean = sanitizeEvent(type, data) ?: return
-            if (recording) {
-                synchronized(lock) {
-                    val r = recorder
-                    val event = r?.add(now(), type, clean)
-                    if (event != null) journal?.event(event, r.windowStartSeq)
-                }
-            }
+            if (recording) append(type, clean)
             mon?.onRecorded(type, clean)
             if (type == EventTypes.ACTION && mon != null && config.enableUserInteractionTracing) {
                 (clean["id"] as? String)?.let { id -> host.postToMain { screenTracer?.onAction(id) } }
@@ -277,6 +273,30 @@ internal class Runtime(
         } catch (e: Throwable) {
             warnOnce("dropping a $type event: $e")
         }
+    }
+
+    private fun append(type: String, clean: Map<String, Any?>) {
+        synchronized(lock) {
+            val r = recorder
+            val event = r?.add(now(), type, clean)
+            if (event != null) journal?.event(event, r.windowStartSeq)
+        }
+    }
+
+    /**
+     * A changed guard decision (emergency-client-v1 §7.8), any thread. It
+     * goes through the capture rules like any event; one the app's hook drops
+     * makes the capsule's decisions partial.
+     */
+    fun recordDecision(data: Map<String, Any?>) {
+        if (!recording) return
+        val clean = sanitizeEvent(EventTypes.EMERGENCY_DECISION, data)
+        if (clean == null) BugCapsule.emergency.decisionDropped() else append(EventTypes.EMERGENCY_DECISION, clean)
+    }
+
+    /** The journal header carries the capability: a crash may come before the next refresh. */
+    fun onDecisionsIncomplete() {
+        if (journal != null) schedule(0) { refreshJournalHeader() }
     }
 
     override fun startHttpSpan(method: String, url: String): HttpSpanHandle? {
@@ -447,6 +467,7 @@ internal class Runtime(
                 }
             }
             recording = true
+            BugCapsule.emergency.writeTrackedDecisions() // Those made before recording started.
             if (journal != null) schedule(0) { refreshJournalHeader() }
             installErrorHandler()
             schedulePeriodicCheckpoint()
@@ -843,6 +864,8 @@ internal class Runtime(
                     journal?.checkpoint(checkpoint, r.windowStartSeq)
                 }
             }
+            // So a window that starts at this checkpoint knows the decisions made before it.
+            BugCapsule.emergency.writeTrackedDecisions()
             if (journal != null) schedule(0) { refreshJournalHeader() }
         } catch (e: Throwable) {
             warnOnce("periodic checkpoint failed: $e")
@@ -1050,6 +1073,7 @@ internal class Runtime(
             } catch (_: Throwable) {
             }
         }
+        capabilities[EMERGENCY_DECISIONS_CAPABILITY] = if (BugCapsule.emergency.decisionsComplete) "supported" else "partial"
         return CapsuleManifest(
             capsuleId = capsuleId,
             createdAtMs = System.currentTimeMillis(),
