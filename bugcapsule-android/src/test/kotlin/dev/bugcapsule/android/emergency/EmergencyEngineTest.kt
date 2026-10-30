@@ -591,6 +591,170 @@ class EmergencyEngineTest {
         assertTrue(e.evaluate("checkout.confirm_order", EmergencyContext(outside)).allowed)
     }
 
+    // -------------------------------------------------------- runtime reports
+
+    private fun update(state: EmergencyUpdateState, flow: EmergencyUpdateFlow = EmergencyUpdateFlow.FLEXIBLE) =
+        RuntimeReport.of(EmergencyUpdateStatus("google_play", flow, state, "2.4.2+57", "2.4.2+57"))!!
+
+    private fun runtimeReports() = transport.receipts.filter { it["status"] == "RUNTIME" }
+
+    private fun reportRuntime(e: EmergencyEngine, runtime: Map<String, Any?>) {
+        e.reportRuntime(runtime)
+        drain()
+    }
+
+    /** Fires the pending runtime timer (the only timer while no refresh is scheduled). */
+    private fun fireRuntimeTimer() {
+        val entry = scheduler.pending.single { it.delayMs <= EmergencyEngine.RUNTIME_INTERVAL_MS && it.task !in refreshTasks }
+        entry.cancelled = true
+        entry.task.run()
+        drain()
+    }
+
+    private val refreshTasks = HashSet<Runnable>()
+
+    @Test
+    fun runtimeReportIsAReceiptWithTheHighestRevision() {
+        transport.answer(EmergencyFetchResult.Failed("offline"))
+        val e = started(engine())
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        val r = runtimeReports()
+        assertEquals(1, r.size)
+        assertEquals(
+            linkedMapOf<String, Any?>(
+                "environment" to "production", "platform" to "NATIVE_ANDROID", "installationId" to e.installationId,
+                "appVersion" to "2.4.1", "sdkVersion" to "0.5.0-test", "revision" to 0L, "status" to "RUNTIME", "errorCode" to null,
+                "runtime" to linkedMapOf(
+                    "update" to linkedMapOf(
+                        "provider" to "google_play", "flow" to "flexible", "state" to "available",
+                        "availableVersion" to "2.4.2+57", "requiredVersion" to "2.4.2+57",
+                    ),
+                ),
+            ),
+            r[0],
+        )
+        assertEquals("no hotfix on Android", setOf("update"), (r[0]["runtime"] as Map<*, *>).keys)
+
+        now += 61_000
+        transport.ok(signer.envelope(document(42)))
+        refresh(e)
+        reportRuntime(e, update(EmergencyUpdateState.IN_PROGRESS))
+        assertEquals("after a revision was accepted", 42L, runtimeReports().last()["revision"])
+    }
+
+    @Test
+    fun appliedAndFailedReceiptsCarryTheLatestRuntime() {
+        transport.answer(EmergencyFetchResult.Failed("offline"))
+        val e = started(engine())
+        reportRuntime(e, update(EmergencyUpdateState.DOWNLOADED))
+        transport.ok(signer.envelope(document(42)))
+        refresh(e)
+        transport.ok(signer.envelope(document(40)))
+        refresh(e)
+        val applied = transport.receipts.single { it["status"] == "APPLIED" }
+        val failed = transport.receipts.single { it["status"] == "FAILED" }
+        assertEquals(update(EmergencyUpdateState.DOWNLOADED), applied["runtime"])
+        assertEquals(update(EmergencyUpdateState.DOWNLOADED), failed["runtime"])
+    }
+
+    @Test
+    fun receiptsWithoutARuntimeHaveNoRuntimeField() {
+        transport.ok(signer.envelope(document(42)))
+        started(engine())
+        assertFalse(transport.receipts.single().containsKey("runtime"))
+    }
+
+    @Test
+    fun runtimeReportsAreThrottledAndCoalescedToTheLatest() {
+        transport.answer(EmergencyFetchResult.Failed("offline"))
+        val e = started(engine())
+        scheduler.pending.forEach { refreshTasks += it.task }
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        assertEquals(1, runtimeReports().size)
+
+        now += 10_000
+        reportRuntime(e, update(EmergencyUpdateState.IN_PROGRESS))
+        now += 10_000
+        reportRuntime(e, update(EmergencyUpdateState.DOWNLOADED))
+        assertEquals("within 60 s nothing more is sent", 1, runtimeReports().size)
+        val timer = scheduler.pending.single { it.task !in refreshTasks }
+        assertEquals("armed by the first change, for the end of the interval", 50_000L, timer.delayMs)
+
+        now += 40_000
+        fireRuntimeTimer()
+        val r = runtimeReports()
+        assertEquals(2, r.size)
+        assertEquals("only the latest", update(EmergencyUpdateState.DOWNLOADED), r[1]["runtime"])
+    }
+
+    @Test
+    fun theSameRuntimeIsNeverSentTwiceInARow() {
+        transport.answer(EmergencyFetchResult.Failed("offline"))
+        val e = started(engine())
+        scheduler.pending.forEach { refreshTasks += it.task }
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        assertEquals(1, runtimeReports().size)
+
+        // Changed and changed back within the interval: the latest equals the last sent one.
+        now += 10_000
+        reportRuntime(e, update(EmergencyUpdateState.DECLINED))
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        now += 50_000
+        fireRuntimeTimer()
+        assertEquals("nothing new at the end of the interval", 1, runtimeReports().size)
+
+        // A → B → A over separate intervals: each change is sent, also a repeated object.
+        now += 61_000
+        reportRuntime(e, update(EmergencyUpdateState.DECLINED))
+        now += 61_000
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        assertTrue(scheduler.pending.none { it.task !in refreshTasks })
+        assertEquals(
+            listOf("available", "declined", "available"),
+            runtimeReports().map { ((it["runtime"] as Map<*, *>)["update"] as Map<*, *>)["state"] },
+        )
+        assertEquals("RUNTIME receipts are exempt from the per-revision rule", setOf(0L), runtimeReports().map { it["revision"] }.toSet())
+    }
+
+    @Test
+    fun noRuntimeReportsInReplayModeOrWithoutAnAnchor() {
+        replaying = true
+        val e = started(engine())
+        reportRuntime(e, update(EmergencyUpdateState.AVAILABLE))
+        assertTrue(transport.receipts.isEmpty())
+
+        replaying = false
+        val off = started(engine(anchorString = "bcek.v1.invalid"))
+        reportRuntime(off, update(EmergencyUpdateState.FAILED))
+        assertTrue(transport.receipts.isEmpty())
+    }
+
+    @Test
+    fun runtimeObjectsAreValidatedBeforeTheyAreSent() {
+        assertNull(RuntimeReport.of(EmergencyUpdateStatus("Google Play", EmergencyUpdateFlow.FLEXIBLE, EmergencyUpdateState.AVAILABLE)))
+        assertNull(RuntimeReport.of(EmergencyUpdateStatus("a".repeat(33), EmergencyUpdateFlow.FLEXIBLE, EmergencyUpdateState.AVAILABLE)))
+        assertNull(RuntimeReport.of(EmergencyUpdateStatus("_play", EmergencyUpdateFlow.FLEXIBLE, EmergencyUpdateState.AVAILABLE)))
+        val long = "1." + "0".repeat(63)
+        assertNull(RuntimeReport.of(EmergencyUpdateStatus("google_play", EmergencyUpdateFlow.FLEXIBLE, EmergencyUpdateState.AVAILABLE, long)))
+        assertNull(RuntimeReport.of(EmergencyUpdateStatus("google_play", EmergencyUpdateFlow.FLEXIBLE, EmergencyUpdateState.AVAILABLE, null, long)))
+        val ok = RuntimeReport.of(EmergencyUpdateStatus("app_store", EmergencyUpdateFlow.STORE_PAGE, EmergencyUpdateState.OPENED_STORE, "1".repeat(64)))
+        assertEquals(
+            mapOf(
+                "update" to mapOf(
+                    "provider" to "app_store", "flow" to "store_page", "state" to "opened_store",
+                    "availableVersion" to "1".repeat(64), "requiredVersion" to null,
+                ),
+            ),
+            ok,
+        )
+        assertEquals(
+            listOf("not_available", "available", "in_progress", "downloaded", "declined", "failed", "opened_store"),
+            EmergencyUpdateState.entries.map { it.wire },
+        )
+        assertEquals(listOf("immediate", "flexible", "store_page", "custom"), EmergencyUpdateFlow.entries.map { it.wire })
+    }
+
     // ------------------------------------------------------------------ replay
 
     @Test

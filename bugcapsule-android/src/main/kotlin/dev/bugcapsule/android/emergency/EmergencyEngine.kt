@@ -27,7 +27,7 @@ internal class Current(
 /**
  * The emergency client runtime of one process (emergency-client-v1 §5, §7):
  * startup from the re-verified cache, refresh with backoff, acceptance and
- * anti-replay, receipts, failure modes and replay mode.
+ * anti-replay, receipts, runtime reports, failure modes and replay mode.
  *
  * Threading: fetches, acceptance, persistence and timers run on [executor]
  * (one thread); [evaluate], [getPolicy] and [status] read the volatile
@@ -92,6 +92,13 @@ internal class EmergencyEngine(
     private var timer: Cancellable? = null
     private var notifiedState: EmergencyState? = null
     private var notifiedRevision: Long? = null
+
+    // Runtime reports (§7.6), confined to the executor.
+    private var runtime: Map<String, Any?>? = null
+    private var runtimeKey: String? = null
+    private var sentRuntimeKey: String? = null
+    private var runtimeSentAtMs: Long? = null
+    private var runtimeTimer: Cancellable? = null
 
     private val lock = Any()
     private var inFlight: FutureTask<EmergencyStatus>? = null
@@ -338,11 +345,15 @@ internal class EmergencyEngine(
         scheduledDelayMs = null
     }
 
-    /** §7.3: once per (revision, status, errorCode) and process; fire-and-forget. */
+    /** §7.3: once per (revision, status, errorCode) and process; fire-and-forget. APPLIED and FAILED carry the latest runtime (§7.6). */
     private fun receipt(a: TrustAnchor, t: EmergencyTransport, revision: Long, status: String, errorCode: String?) {
         if (replaying()) return
         if (!sentReceipts.add("$revision|$status|$errorCode")) return
-        val body = linkedMapOf<String, Any?>(
+        send(a, t, receiptBody(revision, status, errorCode, runtime))
+    }
+
+    private fun receiptBody(revision: Long, status: String, errorCode: String?, runtime: Map<String, Any?>?): Map<String, Any?> =
+        linkedMapOf<String, Any?>(
             "environment" to environment,
             "platform" to EmergencyContract.PLATFORM,
             "installationId" to installationId,
@@ -351,7 +362,9 @@ internal class EmergencyEngine(
             "revision" to maxOf(revision, 0L),
             "status" to status,
             "errorCode" to errorCode,
-        )
+        ).apply { if (runtime != null) put("runtime", runtime) }
+
+    private fun send(a: TrustAnchor, t: EmergencyTransport, body: Map<String, Any?>) {
         execute {
             try {
                 val code = t.sendReceipt(a.app, body)
@@ -360,6 +373,47 @@ internal class EmergencyEngine(
                 SdkLog.w("emergency: receipt not sent: $e")
             }
         }
+    }
+
+    // ------------------------------------------------------- runtime reports
+
+    /**
+     * §7.6: [runtime] is the validated `runtime` object (any thread). It is
+     * sent when it changes, never the same object twice in a row, and at most
+     * once every [RUNTIME_INTERVAL_MS]; a change within the interval is sent
+     * when the interval ends, and only the latest one. RUNTIME receipts are
+     * exempt from the once-per-(revision, status, errorCode) rule of §7.3.
+     */
+    fun reportRuntime(runtime: Map<String, Any?>) {
+        execute {
+            val key = Json.stringify(runtime)
+            if (key == runtimeKey) return@execute
+            this.runtime = runtime
+            runtimeKey = key
+            flushRuntime()
+        }
+    }
+
+    private fun flushRuntime() {
+        val key = runtimeKey ?: return
+        if (disposed || key == sentRuntimeKey || runtimeTimer != null) return
+        val now = nowMs()
+        val last = runtimeSentAtMs
+        if (last != null && now - last in 0 until RUNTIME_INTERVAL_MS) {
+            runtimeTimer = scheduler.schedule(last + RUNTIME_INTERVAL_MS - now) {
+                execute {
+                    runtimeTimer = null
+                    flushRuntime()
+                }
+            }
+            return
+        }
+        if (replaying() || credentialRejected) return
+        val a = anchor ?: return
+        val t = transport() ?: return
+        sentRuntimeKey = key
+        runtimeSentAtMs = now
+        send(a, t, receiptBody(highestRevision, "RUNTIME", null, runtime))
     }
 
     // ------------------------------------------------------------- lifecycle
@@ -388,6 +442,7 @@ internal class EmergencyEngine(
     fun dispose() {
         disposed = true
         timer?.cancel()
+        runtimeTimer?.cancel()
     }
 
     // ------------------------------------------------------------- internals
@@ -436,6 +491,9 @@ internal class EmergencyEngine(
 
     companion object {
         const val MAX_BACKOFF_MS = 15 * 60_000L
+
+        /** At most one runtime report per this interval (§7.6). */
+        const val RUNTIME_INTERVAL_MS = 60_000L
 
         /** A foreground transition within this long of a successful fetch only re-arms the timer. */
         const val FOREGROUND_REFETCH_AFTER_MS = EmergencyConfig.MIN_REFRESH_INTERVAL_MS
