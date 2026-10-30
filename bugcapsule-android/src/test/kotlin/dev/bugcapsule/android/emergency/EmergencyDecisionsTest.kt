@@ -284,6 +284,23 @@ class EmergencyDecisionsTest {
     }
 
     @Test
+    fun checkpointRewritesDoNotKeepALongGapFromBeingSkipped() {
+        val actions = ActionRegistry()
+        val rewrites = (1L..3L).map { i -> decision(i, i * 5_000, "BLOCK") }
+        val events = rewrites + CapsuleEvent(4, 20_000, "action", mapOf("id" to "pay"))
+        val engine = ReplayEngine(
+            TestCapsules.capsule(events),
+            ReplaySettings(strategy = ReplayStrategy.SEMANTIC, settleTimeoutMs = 50),
+            actions, null, null,
+        )
+        var seen: EmergencyAction? = null
+        actions.register("pay") { seen = engine.emergencyDecision(key, null)?.action }
+        val report = engine.run(FakeDriver())
+        assertTrue("skipped ${report.compressedMs} ms of 20 s", report.compressedMs >= 19_000)
+        assertEquals(EmergencyAction.BLOCK, seen)
+    }
+
+    @Test
     fun aDecisionInACompressedIdleStretchIsSeenAfterIt() {
         val actions = ActionRegistry()
         val events = listOf(decision(1, 200, "BLOCK"), CapsuleEvent(2, 4_000, "action", mapOf("id" to "pay")))

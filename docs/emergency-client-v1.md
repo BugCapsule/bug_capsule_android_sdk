@@ -353,8 +353,9 @@ is a change, including `documentRevision`.
 
 A periodic checkpoint writes one event for each tracked decision, right after
 the checkpoint, so a window that starts there still knows the decisions made
-before it. The SDK tracks at most 256 key and subject pairs. Decisions for
-further pairs are not recorded.
+before it. These events aren't app activity, so idle compression ignores them.
+The SDK tracks at most 256 key and subject pairs. Decisions for further pairs
+are not recorded.
 
 **Capability.** `manifest.capabilities["emergency.decisions"]` says whether a
 replay can trust the Capsule's decisions:
@@ -362,7 +363,7 @@ replay can trust the Capsule's decisions:
 | Value | Meaning |
 |---|---|
 | `supported` | Every decision is in the Capsule. A Capsule with no events made no evaluations. |
-| `partial` | Some decisions are missing: the 256 pair limit was reached, or the app's `beforeRecord` hook dropped one. |
+| `partial` | Some decisions are missing: the 256 pair limit was reached, or the capture rules dropped one or changed its `key` or `action` (for example `key` in the app's redaction keys). |
 | absent | The SDK didn't record decisions. |
 
 **Replay.** Replay looks up each evaluation at the replay clock `t`, in the
@@ -380,6 +381,9 @@ The result has the recorded fields with `source: replay` and no policy object.
 The recorded `source` is not exposed. An entry with an unknown `action` or
 without a `key` is ignored. Capsules without the capability replay as before:
 every evaluation returns ALLOW with `source: replay`.
+
+A replayed `REQUIRE_UPDATE` must not reach anything: recovery adapters (§7.7)
+make no provider or network calls during replay.
 
 Replay needs an SDK that supports this section. A candidate built with an
 older SDK allows every feature.

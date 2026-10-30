@@ -22,8 +22,11 @@ import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.ReplaySettings
 import dev.bugcapsule.android.internal.BugCapsuleTestOverrides
+import dev.bugcapsule.android.internal.ConfigFetchResult
 import dev.bugcapsule.android.internal.CrashCapsules
 import dev.bugcapsule.android.internal.Runtime
+import dev.bugcapsule.android.internal.Transport
+import dev.bugcapsule.android.internal.FakeTransport as CaptureTransport
 import dev.bugcapsule.android.replay.BugCapsuleReplay
 import dev.bugcapsule.android.replay.CrashReplay
 import dev.bugcapsule.android.replay.FakeDriver
@@ -128,8 +131,13 @@ class EmergencyDecisionCaptureTest {
         )
     }
 
-    private fun start(hook: BeforeRecord? = null, mode: CaptureMode = CaptureMode.QA, configure: BugCapsuleConfig.Builder.() -> Unit = {}) {
-        BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.root, null)
+    private fun start(
+        hook: BeforeRecord? = null,
+        mode: CaptureMode = CaptureMode.QA,
+        capture: Transport? = null,
+        configure: BugCapsuleConfig.Builder.() -> Unit = {},
+    ) {
+        BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.root, capture)
         BugCapsule.init(
             app,
             BugCapsuleConfig.builder().mode(mode).gitSha("abc123").autoCaptureOnFailure(false).beforeRecord(hook).apply(configure).build(),
@@ -252,7 +260,54 @@ class EmergencyDecisionCaptureTest {
         guard()
         start(hook = { type, data -> if (type == EventTypes.EMERGENCY_DECISION) data + ("message" to "edited") else data })
         BugCapsule.emergency.evaluate(key)
-        assertEquals("edited", decisions(captured()).single().data["message"])
+        val c = captured()
+        assertEquals("edited", decisions(c).single().data["message"])
+        assertEquals("supported", capability(c))
+    }
+
+    @Test
+    fun aHookThatChangesTheKeyOrActionLosesTheDecision() {
+        for (field in listOf("key", "action")) {
+            guard()
+            start(hook = { type, data -> if (type == EventTypes.EMERGENCY_DECISION) data + (field to "CHANGED") else data })
+            assertFalse(BugCapsule.emergency.evaluate(key).allowed)
+            val c = captured()
+            assertTrue(field, decisions(c).isEmpty())
+            assertEquals(field, "partial", capability(c))
+            BugCapsule.resetForTest()
+        }
+    }
+
+    @Test
+    fun aRedactionRuleOnTheKeyOrActionLosesTheDecisionAndSaysSo() {
+        for (field in listOf("key", "action")) {
+            guard()
+            start { redactKeys(field) }
+            assertEquals(field, EmergencyAction.BLOCK, BugCapsule.emergency.evaluate(key).action)
+            val c = captured()
+            assertTrue(field, decisions(c).isEmpty())
+            assertEquals(field, "partial", capability(c))
+            assertEquals(field, "partial", journalCapability())
+            BugCapsule.resetForTest()
+        }
+    }
+
+    @Test
+    fun aRemoteRuleOnTheKeyLosesBufferedDecisionsAndSaysSo() {
+        guard()
+        val remote = CaptureTransport()
+        start(capture = remote) { backend("http://backend.test", "bci_test_key_000000000000000") }
+        BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
+        BugCapsule.emergency.evaluate(key)
+        assertEquals("supported", journalCapability())
+
+        remote.configs.add(ConfigFetchResult.Fetched(CaptureTransport.config(keys = listOf("key"))))
+        BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
+
+        assertEquals("partial", journalCapability())
+        val c = captured()
+        assertTrue(decisions(c).isEmpty())
+        assertEquals("partial", capability(c))
     }
 
     @Test
@@ -271,6 +326,7 @@ class EmergencyDecisionCaptureTest {
         val d = decisions(captured()).single().data
         assertEquals("[REDACTED]", d["reasonCode"])
         assertEquals(key, d["key"])
+        assertEquals("supported", capability(captured()))
     }
 
     @Test

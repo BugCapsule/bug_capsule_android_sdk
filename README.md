@@ -552,8 +552,9 @@ if (!decision.allowed) {
 - While a session records, each decision goes into the capsule as an
   `emergency.decision` event when it changes, so a replay sees what the user
   saw. A subject is never written, only a short hash of it. The events follow
-  your capture rules, including `beforeRecord`. Dropping one, or going past
-  256 feature key and subject pairs, marks the capsule `partial` in
+  your capture rules, including `beforeRecord`. Dropping one, changing its
+  `key` or `action` (for example with `key` in your redaction keys), or going
+  past 256 feature key and subject pairs marks the capsule `partial` in
   `manifest.capabilities["emergency.decisions"]`.
 - During replay `evaluate` returns the recorded decision with source `REPLAY`,
   and ALLOW for a key the capsule doesn't have. `getPolicy` returns null,
