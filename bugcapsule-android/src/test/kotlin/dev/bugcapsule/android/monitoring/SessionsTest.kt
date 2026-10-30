@@ -1,5 +1,6 @@
 package dev.bugcapsule.android.monitoring
 
+import dev.bugcapsule.android.core.PatchIdentity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -20,6 +21,66 @@ class SessionsTest {
         file, "install-1", release, environment, 30_000, { hub.now }, { user },
         { p, sync -> sent.add(p to sync) }, hub::schedule,
     )
+
+    private val patched = PatchIdentity("base-1", "sha256:patched", 1, "sha256:host")
+    private val bare = PatchIdentity("base-1", null, 1, "sha256:host")
+
+    private fun patchTracker(identity: PatchIdentity?) = SessionTracker(
+        File(tmp.root, "session.json"), "install-1", "app@1+1", "production", 30_000, { hub.now }, { user },
+        { p, sync -> sent.add(p to sync) }, hub::schedule, { identity },
+    )
+
+    @Test
+    fun everyUpdateCarriesThePatchStartingWithTheFirst() {
+        val t = patchTracker(patched)
+        t.onForeground()
+        t.end()
+
+        assertEquals(2, sent.size)
+        sent.forEach { (payload, _) ->
+            assertEquals("base-1", payload["patchBaseBuildId"])
+            assertEquals("sha256:patched", payload["patchSetDigest"])
+        }
+    }
+
+    @Test
+    fun theBareBaseReportsItsBuildWithNoDigestTheRolloutControl() {
+        patchTracker(bare).onForeground()
+
+        assertEquals("base-1", sent.single().first["patchBaseBuildId"])
+        assertFalse(sent.single().first.containsKey("patchSetDigest"))
+    }
+
+    @Test
+    fun noPatchRuntimeSendsNeitherField() {
+        patchTracker(null).onForeground()
+
+        assertFalse(sent.single().first.containsKey("patchBaseBuildId"))
+        assertFalse(sent.single().first.containsKey("patchSetDigest"))
+    }
+
+    @Test
+    fun aRecoveredSessionReportsThePatchItRanNotTheCurrentOne() {
+        patchTracker(patched).onForeground()
+        sent.clear()
+
+        patchTracker(bare).recoverPrevious(hub.now)
+
+        assertEquals("crashed", sent.single().first["status"])
+        assertEquals("base-1", sent.single().first["patchBaseBuildId"])
+        assertEquals("sha256:patched", sent.single().first["patchSetDigest"])
+    }
+
+    @Test
+    fun aSessionSavedBeforeIdentityExistedClaimsNoPatch() {
+        patchTracker(null).onForeground()
+        sent.clear()
+
+        patchTracker(patched).recoverPrevious(hub.now)
+
+        assertFalse(sent.single().first.containsKey("patchBaseBuildId"))
+        assertFalse(sent.single().first.containsKey("patchSetDigest"))
+    }
 
     @Test
     fun aForegroundRunIsOneSessionEndedThirtySecondsIntoTheBackground() {

@@ -18,6 +18,10 @@ import dev.bugcapsule.android.core.CapsuleCodec
 import dev.bugcapsule.android.core.CapsuleDependency
 import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.CapsuleManifest
+import dev.bugcapsule.android.core.PatchIdentity
+import dev.bugcapsule.android.core.ReplayProtocol
+import dev.bugcapsule.android.core.patchPreflight
+import dev.bugcapsule.android.replay.ReplayReporter
 import dev.bugcapsule.android.core.CapsuleValidator
 import dev.bugcapsule.android.core.CaptureMode
 import dev.bugcapsule.android.core.Checkpoint
@@ -486,6 +490,7 @@ internal class Runtime(
         override val config: BugCapsuleConfig get() = this@Runtime.config
         override val mode: CaptureMode get() = this@Runtime.mode
         override val redactor: Redactor get() = currentRedactor
+        override val patchIdentity: PatchIdentity? get() = this@Runtime.patchIdentity
         override val app: AppIdentity by lazy {
             val pkg = host.packageInfo()
             AppIdentity(config.appId ?: pkg.id, config.appVersion ?: pkg.version, config.appBuild ?: pkg.build, config.appName ?: pkg.name)
@@ -963,12 +968,13 @@ internal class Runtime(
         if (window.hasGap) {
             eligibility.missing("events.window", "events between the checkpoint and the window were evicted; raise window or maxEvents")
         }
+        val patch = patchIdentity
         val dependencies = try {
             interactionRecorder.dependencies(window.events)
         } catch (e: Throwable) {
             SdkLog.w("interaction dependencies failed: $e")
             emptyList()
-        }
+        } + listOfNotNull(patch?.takeIf { it.patchSetDigest != null }?.dependency)
         windowEligibility(eligibility, window, dependencies)
 
         val events = window.events.map { it.shift(anchor) }
@@ -980,6 +986,7 @@ internal class Runtime(
                 labels = labels,
                 dependencies = dependencies,
             ).copy(
+                patch = patch,
                 failure = failure?.shift(anchor),
                 eligibility = eligibility.build(),
                 eventCount = events.size,
@@ -1136,7 +1143,9 @@ internal class Runtime(
                 emptyList()
             }
             val anchor = anchorMs
-            val m = manifest("journal", wallAtAnchorMs ?: 0, 0, emptyMap(), dependencies).toJson()
+            val patch = patchIdentity
+            val withPatch = dependencies + listOfNotNull(patch?.takeIf { it.patchSetDigest != null }?.dependency)
+            val m = manifest("journal", wallAtAnchorMs ?: 0, 0, emptyMap(), withPatch).copy(patch = patch).toJson()
             val header = linkedMapOf<String, Any?>("journal" to 1)
             for (key in JOURNAL_HEADER_KEYS) m[key]?.let { header[key] = it }
             header["session"] = LinkedHashMap(J.obj(m["session"])!!).also {
@@ -1440,6 +1449,60 @@ internal class Runtime(
 
     // ---------------------------------------------------------------- replay
 
+    private val PATCH_FETCH_TIMEOUT_MS = 30_000L
+
+    /** What this process runs. Read once: a process pins one generation. */
+    private val patchIdentityOnce = lazy {
+        try {
+            config.patchBinding?.identity
+        } catch (t: Throwable) {
+            SdkLog.w("patch identity unavailable: $t")
+            null
+        }
+    }
+    private var pinnedPatch: PatchIdentity? = null
+    private var patchPinned = false
+    private val patchIdentity: PatchIdentity? get() = if (patchPinned) pinnedPatch else patchIdentityOnce.value
+
+    /** Loads the exact patch of a replay attempt. Returns why it can't run, or null. */
+    private fun pinPatch(armed: BugCapsuleReplay.Armed): String? {
+        val binding = config.patchBinding
+        val settings = armed.settings
+        patchPinned = true
+        if (binding != null) {
+            val fetched = arrayOfNulls<ByteArray>(3)
+            var failure: Throwable? = null
+            // The replay channel uses sockets, which the main thread may not.
+            // This thread only fetches: a late result is ignored, so an attempt
+            // refused on timeout can never change what the process runs.
+            val fetch = Thread {
+                try {
+                    if (settings.patchArtifact) fetched[0] = armed.channel.fetchPatchFile(ReplayProtocol.PATCH_PATH)
+                    if (settings.patchKeyring) {
+                        fetched[1] = armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_PATH)
+                        fetched[2] = armed.channel.fetchPatchFile(ReplayProtocol.KEYRING_SIGNATURE_PATH)
+                    }
+                } catch (t: Throwable) {
+                    failure = t
+                }
+            }
+            fetch.isDaemon = true
+            fetch.start()
+            fetch.join(PATCH_FETCH_TIMEOUT_MS)
+            if (fetch.isAlive) {
+                fetch.interrupt()
+                return "patch.unavailable: timed out loading the pinned artifact"
+            }
+            failure?.let { return "patch.unavailable: $it" }
+            try {
+                pinnedPatch = binding.pinForReplay(fetched[0], fetched[1], fetched[2])
+            } catch (t: Throwable) {
+                return "patch.unavailable: $t"
+            }
+        }
+        return patchPreflight(armed.capsule.manifest, settings, binding != null, pinnedPatch)
+    }
+
     private fun startReplay(armed: BugCapsuleReplay.Armed) {
         val capsule = armed.capsule
         val settings = armed.settings
@@ -1476,10 +1539,11 @@ internal class Runtime(
                 emptyList()
             }
         }
-        val unsupported = InteractionReplay.preflight(capsule, adapters)
+        val unsupported = pinPatch(armed) ?: InteractionReplay.preflight(capsule, adapters)
+        val reporter = ReplayReporter { r -> armed.reporter.report(r.copy(patch = pinnedPatch)) }
         if (unsupported != null) {
             SdkLog.w("replay incompatible: $unsupported")
-            armed.reporter.report(
+            reporter.report(
                 ReplayReport(
                     outcome = ReplayOutcome.INCOMPATIBLE,
                     attempt = settings.attempt,
@@ -1495,7 +1559,7 @@ internal class Runtime(
             return
         }
         val e = ReplayEngine(
-            capsule, settings, actions, gitSha, armed.reporter,
+            capsule, settings, actions, gitSha, reporter,
             attemptMarker = CrashReplay.markerFile(host.context.noBackupFilesDir),
         )
         engine = e
@@ -1657,7 +1721,7 @@ internal class Runtime(
         const val INTERACTIONS_KEY = "interactions"
 
         /** Manifest fields copied into the crash journal's header (crash-capsules §1). */
-        private val JOURNAL_HEADER_KEYS = listOf(
+        private val JOURNAL_HEADER_KEYS = listOf("patch", 
             "mode", "app", "source", "sdk", "stateSchemaVersion", "platform",
             "integrations", "labels", "redaction", "runtime", "capabilities", "dependencies",
         )

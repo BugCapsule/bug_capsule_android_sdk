@@ -2,6 +2,9 @@ package dev.bugcapsule.android.internal
 
 import dev.bugcapsule.android.core.CapsuleCodec
 import dev.bugcapsule.android.core.CapsuleLimits
+import dev.bugcapsule.android.core.CapsuleDependency
+import dev.bugcapsule.android.core.DependencyCoverage
+import dev.bugcapsule.android.core.PatchIdentity
 import dev.bugcapsule.android.core.CapsuleEvent
 import dev.bugcapsule.android.core.Checkpoint
 import dev.bugcapsule.android.core.CheckpointKind
@@ -139,6 +142,36 @@ class CrashCapsulesTest {
         assertEquals("abc123", m.gitSha)
         assertEquals(listOf("okhttp"), m.integrations)
         assertEquals("android", m.runtimeName)
+    }
+
+    @Test
+    fun recoveredPatchedCrashKeepsIdentityAndMandatoryRuntimeWithoutInteractions() {
+        val identity = PatchIdentity("android+42", "sha256:" + "a".repeat(64), 1, "sha256:" + "b".repeat(64), "sha256:" + "c".repeat(64))
+        val h = header().also {
+            it["patch"] = identity.toJson()
+            it["dependencies"] = listOf(identity.dependency.toJson())
+        }
+        val journal = CrashCapsules.read(journalDir(listOf(launch), emptyList(), h))!!
+        var eligibilityDependencies = emptyList<CapsuleDependency>()
+        val built = CrashCapsules.build(journal, crash(), 5_000_000, { _, _, dependencies -> eligibilityDependencies = dependencies })!!
+        val capsule = CapsuleCodec.decode(built.bytes)
+        assertTrue(capsule.events.isEmpty())
+        assertEquals(identity, capsule.manifest.patch)
+        assertEquals(listOf(identity.dependency), capsule.manifest.dependencies)
+        assertEquals(listOf(identity.dependency), eligibilityDependencies)
+        assertTrue(capsule.manifest.dependencies.single().required)
+        assertEquals(DependencyCoverage.COMPLETE, capsule.manifest.dependencies.single().coverage)
+    }
+
+    @Test
+    fun ordinaryUnusedCompleteDependenciesAreStillDroppedWhilePartialOnesRemain() {
+        val complete = CapsuleDependency("unused.native", "native", "shop.native", "1", 1, true, DependencyCoverage.COMPLETE)
+        val partial = complete.copy(id = "partial.native", coverage = DependencyCoverage.PARTIAL)
+        val optionalPatch = PatchIdentity("base", null, 1, "sha256:" + "b".repeat(64)).dependency.copy(required = false)
+        val h = header().also { it["dependencies"] = listOf(complete, partial, optionalPatch).map { d -> d.toJson() } }
+        val capsule = CapsuleCodec.decode(build(journalDir(listOf(launch), emptyList(), h))!!.bytes)
+        assertNull(capsule.manifest.patch)
+        assertEquals(listOf(partial), capsule.manifest.dependencies)
     }
 
     @Test

@@ -15,6 +15,7 @@ import dev.bugcapsule.android.core.Iso8601
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.RecordedWindow
+import dev.bugcapsule.android.core.PATCH_RUNTIME_DEPENDENCY
 import java.io.File
 
 /**
@@ -217,7 +218,12 @@ internal object CrashCapsules {
             } catch (_: Exception) {
                 null
             }
-        }.filter { it.id in usedDeps || it.coverage == DependencyCoverage.PARTIAL }
+        }.filter {
+            // A loaded patch is process state, not an interaction event. Recovery must
+            // retain its mandatory runtime even when the process died before any call.
+            it.id in usedDeps || it.coverage == DependencyCoverage.PARTIAL ||
+                (it.required && it.kind == PATCH_RUNTIME_DEPENDENCY)
+        }
 
         val eligibility = EligibilityBuilder()
         val source = J.obj(h["source"]) ?: emptyMap()
@@ -283,6 +289,7 @@ internal object CrashCapsules {
         J.obj(h["capabilities"])?.let { manifest["capabilities"] = it }
         manifest["monitoring"] = crash.monitoring
         manifest["dependencies"] = dependencies.map { it.toJson() }
+        J.obj(h["patch"])?.let { manifest["patch"] = it }
 
         val doc = linkedMapOf<String, Any?>(
             "format" to CapsuleCodec.FORMAT,

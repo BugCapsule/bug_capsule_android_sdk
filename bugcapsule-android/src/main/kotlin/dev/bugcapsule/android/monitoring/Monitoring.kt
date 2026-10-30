@@ -7,6 +7,7 @@ import dev.bugcapsule.android.core.Ids as CoreIds
 import dev.bugcapsule.android.core.Iso8601
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
+import dev.bugcapsule.android.core.PatchIdentity
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.internal.Cancellable
 import dev.bugcapsule.android.internal.RemoteCaptureConfig
@@ -32,6 +33,9 @@ internal interface MonitoringEnvironment {
     val mode: CaptureMode
     val redactor: Redactor
     val app: AppIdentity
+
+    /** What this process runs. */
+    val patchIdentity: PatchIdentity? get() = null
 
     /** `<storage root>/monitoring`. */
     val dir: File
@@ -762,6 +766,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         userId = { scope.getUser()?.id },
         emit = { payload, sync -> if (sessionTrackingAllowed) enqueue(listOf("session" to payload), sync) },
         schedule = env::schedule,
+        patch = { env.patchIdentity },
     )
 
     private fun readInstallId(): String {
