@@ -363,7 +363,7 @@ replay can trust the Capsule's decisions:
 | Value | Meaning |
 |---|---|
 | `supported` | Every decision is in the Capsule. A Capsule with no events made no evaluations. |
-| `partial` | Some decisions are missing: the 256 pair limit was reached, or the capture rules dropped one or changed its `key` or `action` (for example `key` in the app's redaction keys). |
+| `partial` | Some decisions are missing: the 256 pair limit was reached, or the capture rules dropped one or changed its `key`, `subject` or `action` (for example `key` in the app's redaction keys), including rules that arrive after it was recorded. |
 | absent | The SDK didn't record decisions. |
 
 **Replay.** Replay looks up each evaluation at the replay clock `t`, in the
