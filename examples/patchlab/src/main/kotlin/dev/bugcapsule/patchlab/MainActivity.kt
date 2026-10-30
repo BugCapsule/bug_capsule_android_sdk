@@ -23,7 +23,7 @@ import dev.bugcapsule.patch.compose.PatchSurfaceView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.time.Instant
+import dev.bugcapsule.android.core.Iso8601
 
 data class Line(val sku: String, val qty: Int, val unitCents: Long)
 data class Cart(val lines: List<Line>, val couponPercent: Int)
@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
         val inbox = if (patch.available) processInbox(patch, exchange) else JSONArray()
         if (patch.available) patch.markHealthy("first_screen")
         val record = JSONObject()
-            .put("at", Instant.now().toString())
+            .put("at", Iso8601.format(System.currentTimeMillis()))
             .put("mode", if (BuildConfig.DEBUG || Debug.isDebuggerConnected()) "debug" else "release")
             .put("platform", "android")
             .put("baseBuildId", BuildConfig.BASE_BUILD_ID)
