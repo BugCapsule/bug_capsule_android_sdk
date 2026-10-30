@@ -174,6 +174,9 @@ internal object EmergencyContract {
             null, null, null, false, source,
         )
 
+    /** While a capsule replays, a feature it has no decision for is allowed (§7.8). */
+    fun replayAllowed(featureKey: String) = fixed(featureKey, EmergencyAction.ALLOW, null, EmergencyDecisionSource.REPLAY)
+
     /** Exact key first, then the longest matching `prefix.*`; [EmergencyFailureMode.FAIL_OPEN] otherwise. */
     fun failureModeFor(modes: Map<String, EmergencyFailureMode>, featureKey: String): EmergencyFailureMode {
         modes[featureKey]?.let { return it }
