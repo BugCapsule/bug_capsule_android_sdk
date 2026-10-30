@@ -4,6 +4,7 @@ import dev.bugcapsule.android.core.Ids as CoreIds
 import dev.bugcapsule.android.core.Iso8601
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Json
+import dev.bugcapsule.android.core.PatchIdentity
 import dev.bugcapsule.android.internal.Cancellable
 import dev.bugcapsule.android.internal.Files
 import java.io.File
@@ -27,6 +28,8 @@ internal class SessionTracker(
     /** Sends a `session` payload ([sync]: persist before returning, the process may be dying). */
     private val emit: (payload: Map<String, Any?>, sync: Boolean) -> Unit,
     private val schedule: (Long, Runnable) -> Cancellable,
+    /** What this process runs; rollout health compares sessions by it. */
+    private val patch: () -> PatchIdentity? = { null },
 ) {
     private class State(
         val sid: String,
@@ -40,11 +43,15 @@ internal class SessionTracker(
         /** The release / environment the session ran with: a later process may run a newer build. */
         val release: String,
         val environment: String,
+        /** The patch this session ran, never the current one: it may since have been rolled back. */
+        val patchBaseBuildId: String?,
+        val patchSetDigest: String?,
     ) {
         fun toJson(): Map<String, Any?> = linkedMapOf(
             "sid" to sid, "did" to did, "started" to started, "seq" to seq, "status" to status,
             "errors" to errors, "timestamp" to timestamp, "backgroundSince" to backgroundSince,
             "release" to release, "environment" to environment,
+            "patchBaseBuildId" to patchBaseBuildId, "patchSetDigest" to patchSetDigest,
         )
 
         companion object {
@@ -60,6 +67,8 @@ internal class SessionTracker(
                 backgroundSince = J.long(j["backgroundSince"]),
                 release = J.str(j["release"]) ?: release,
                 environment = J.str(j["environment"]) ?: environment,
+                patchBaseBuildId = J.str(j["patchBaseBuildId"]),
+                patchSetDigest = J.str(j["patchSetDigest"]),
             )
         }
     }
@@ -169,7 +178,11 @@ internal class SessionTracker(
     }
 
     private fun startLocked(now: Long) {
-        val s = State(CoreIds.uuidV4(), userId() ?: installId, now, 0, "ok", 0, now, null, release, environment)
+        val identity = patch()
+        val s = State(
+            CoreIds.uuidV4(), userId() ?: installId, now, 0, "ok", 0, now, null, release, environment,
+            identity?.baseBuildId, identity?.patchSetDigest,
+        )
         current = s
         persist(s)
         emit(payload(s, init = true), false)
@@ -193,7 +206,7 @@ internal class SessionTracker(
         }
     }
 
-    private fun payload(s: State, init: Boolean): Map<String, Any?> = linkedMapOf(
+    private fun payload(s: State, init: Boolean): Map<String, Any?> = linkedMapOf<String, Any?>(
         "sid" to s.sid,
         "did" to s.did,
         "seq" to s.seq,
@@ -206,5 +219,8 @@ internal class SessionTracker(
         "release" to s.release,
         "environment" to s.environment,
         "runtime" to "android",
-    )
+    ).also { p ->
+        s.patchBaseBuildId?.let { p["patchBaseBuildId"] = it }
+        s.patchSetDigest?.let { p["patchSetDigest"] = it }
+    }
 }

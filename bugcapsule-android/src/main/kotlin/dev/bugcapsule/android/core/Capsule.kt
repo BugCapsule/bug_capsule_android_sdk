@@ -69,7 +69,11 @@ data class CapsuleEvent(
     val type: String,
     val data: Map<String, Any?> = emptyMap(),
 ) {
-    fun shift(offsetMs: Long) = copy(t = t - offsetMs)
+    /** [t] and a screenshot's `capturedAtT` are on the same clock, so both move. */
+    fun shift(offsetMs: Long): CapsuleEvent {
+        val capturedAt = (data["capturedAtT"] as? Number)?.toLong() ?: return copy(t = t - offsetMs)
+        return copy(t = t - offsetMs, data = data + ("capturedAtT" to capturedAt - offsetMs))
+    }
 
     fun toJson(): Map<String, Any?> = linkedMapOf("seq" to seq, "t" to t, "type" to type, "data" to data)
 

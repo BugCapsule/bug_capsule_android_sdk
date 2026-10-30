@@ -490,6 +490,7 @@ internal class Runtime(
         override val config: BugCapsuleConfig get() = this@Runtime.config
         override val mode: CaptureMode get() = this@Runtime.mode
         override val redactor: Redactor get() = currentRedactor
+        override val patchIdentity: PatchIdentity? get() = this@Runtime.patchIdentity
         override val app: AppIdentity by lazy {
             val pkg = host.packageInfo()
             AppIdentity(config.appId ?: pkg.id, config.appVersion ?: pkg.version, config.appBuild ?: pkg.build, config.appName ?: pkg.name)
