@@ -12,6 +12,8 @@ android {
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    // Instrumentation must install on current Android; library minSdk stays 23.
+    testOptions { targetSdk = 36 }
 }
 
 dependencies {
