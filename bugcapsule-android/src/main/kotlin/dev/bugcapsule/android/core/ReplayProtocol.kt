@@ -14,6 +14,9 @@ object ReplayProtocol {
     const val CAPSULE_PATH = "/capsule"
     const val SETTINGS_PATH = "/settings"
     const val RESULT_PATH = "/result"
+    const val PATCH_PATH = "/patch-artifact"
+    const val KEYRING_PATH = "/patch-keyring"
+    const val KEYRING_SIGNATURE_PATH = "/patch-keyring-signature"
     const val STDOUT_PREFIX = "BUGCAPSULE_RESULT::"
 }
 
@@ -35,6 +38,11 @@ data class ReplaySettings(
     val idleCompression: Boolean = true,
     val attemptId: String? = null,
     val runtime: String? = null,
+    /** The attempt runs the exact artifact at [ReplayProtocol.PATCH_PATH]. */
+    val patchArtifact: Boolean = false,
+    /** The artifact needs its archived keyring: a delegated key signed it. */
+    val patchKeyring: Boolean = false,
+    val expectedPatchSetDigest: String? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "strategy" to strategy.wire,
@@ -46,6 +54,9 @@ data class ReplaySettings(
     ).also {
         if (attemptId != null) it["attemptId"] = attemptId
         if (runtime != null) it["runtime"] = runtime
+        if (patchArtifact) it["patchArtifact"] = true
+        if (patchKeyring) it["patchKeyring"] = true
+        if (expectedPatchSetDigest != null) it["expectedPatchSetDigest"] = expectedPatchSetDigest
     }
 
     companion object {
@@ -59,6 +70,9 @@ data class ReplaySettings(
             idleCompression = J.bool(j["idleCompression"]) ?: true,
             attemptId = J.str(j["attemptId"]),
             runtime = J.str(j["runtime"]),
+            patchArtifact = J.bool(j["patchArtifact"]) ?: false,
+            patchKeyring = J.bool(j["patchKeyring"]) ?: false,
+            expectedPatchSetDigest = J.str(j["expectedPatchSetDigest"]),
         )
     }
 }
@@ -116,6 +130,8 @@ data class ReplayReport(
     val reasonCode: String? = null,
     /** Crash capsules: how the app under test died (`{mechanism, type, signal?, pid?, source, inAppFrame?}`), null while it lives. */
     val death: Map<String, Any?>? = null,
+    /** What this attempt actually ran; null when the app has no patch runtime. */
+    val patch: PatchIdentity? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "outcome" to outcome.wire,
@@ -138,6 +154,7 @@ data class ReplayReport(
         if (runtime != null) it["runtime"] = runtime
         if (reasonCode != null) it["reasonCode"] = reasonCode
         if (death != null) it["death"] = death
+        if (patch != null) it["patch"] = patch.toJson()
     }
 
     companion object {
@@ -162,6 +179,7 @@ data class ReplayReport(
             runtime = J.str(j["runtime"]),
             reasonCode = J.str(j["reasonCode"]),
             death = J.obj(j["death"]),
+            patch = J.obj(j["patch"])?.let { PatchIdentity.fromJson(it) },
         )
     }
 }

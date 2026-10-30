@@ -49,6 +49,13 @@ class ReplayChannel(val baseUrl: String) {
         return res.body
     }
 
+    /** A file of this attempt's patch archive. Throws when it can't be loaded. */
+    fun fetchPatchFile(path: String): ByteArray {
+        val res = request("GET", path, null)
+        if (res.status != 200) throw IOException("$path download failed: HTTP ${res.status}")
+        return res.body
+    }
+
     fun fetch(): Pair<Capsule, ReplaySettings> {
         val settings = fetchSettings()
         return CapsuleCodec.decode(fetchCapsuleBytes()) to settings

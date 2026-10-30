@@ -4,7 +4,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /** Signed channel metadata as delivered, kept as the exact received bytes. */
-class SignedChannel(val document: ByteArray, val signature: ByteArray, val etag: String? = null)
+class SignedChannel(
+    val document: ByteArray,
+    val signature: ByteArray,
+    val etag: String? = null,
+    /** The current keyring, applied first so a rotated signer verifies. */
+    val keyringDocument: ByteArray? = null,
+    val keyringSignature: ByteArray? = null,
+)
 
 /**
  * How an app reaches its delivery endpoint. TLS, tokens and retries live here;
@@ -35,6 +42,7 @@ class PatchUpdater(private val patch: BugCapsulePatch, private val transport: Pa
         if (channel == null) {
             PatchUpdateResult(PatchUpdateState.UP_TO_DATE)
         } else {
+            if (channel.keyringDocument != null && channel.keyringSignature != null) patch.applyKeyring(channel.keyringDocument, channel.keyringSignature)
             val result = act(patch.applyChannel(channel.document, channel.signature))
             // Only after the download and staging worked: a 304 must not end retries.
             etag = channel.etag
@@ -42,8 +50,12 @@ class PatchUpdater(private val patch: BugCapsulePatch, private val transport: Pa
         }
     } catch (e: PatchException) {
         PatchUpdateResult(PatchUpdateState.FAILED, reason = e.code)
+    } catch (e: PatchHttpException) {
+        PatchUpdateResult(PatchUpdateState.FAILED, reason = e.reason)
     } catch (e: java.io.IOException) {
         PatchUpdateResult(PatchUpdateState.FAILED, reason = "transport: ${e.message}")
+    } catch (e: org.json.JSONException) {
+        PatchUpdateResult(PatchUpdateState.FAILED, reason = "malformed_response")
     }
 
     private fun act(d: JSONObject): PatchUpdateResult {

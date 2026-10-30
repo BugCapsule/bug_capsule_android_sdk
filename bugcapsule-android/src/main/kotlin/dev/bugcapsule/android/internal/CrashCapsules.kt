@@ -283,6 +283,7 @@ internal object CrashCapsules {
         J.obj(h["capabilities"])?.let { manifest["capabilities"] = it }
         manifest["monitoring"] = crash.monitoring
         manifest["dependencies"] = dependencies.map { it.toJson() }
+        J.obj(h["patch"])?.let { manifest["patch"] = it }
 
         val doc = linkedMapOf<String, Any?>(
             "format" to CapsuleCodec.FORMAT,

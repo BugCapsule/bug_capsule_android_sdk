@@ -57,6 +57,9 @@ data class PatchConfig(
 
 class PatchException(val code: String, message: String) : Exception(message)
 
+/** Replay pinning: the archived files an attempt loads, read-only and offline. A null [bundlePath] is the bare base. */
+data class PatchReplay(val bundlePath: String? = null, val keyringPath: String? = null, val keyringSignaturePath: String? = null)
+
 /**
  * The runtime as the app sees it. One generation is pinned at [open] for the
  * life of the process: staging never changes running behavior. This replaces
@@ -130,7 +133,7 @@ class BugCapsulePatch private constructor(
 
     companion object {
         /** Opens the store and selects this process's generation. Never throws: without a runtime, every call uses the fallback. */
-        fun open(config: PatchConfig, modules: List<PatchModule<*, *>>, surfaces: List<PatchSurfaceContract> = emptyList()): BugCapsulePatch {
+        fun open(config: PatchConfig, modules: List<PatchModule<*, *>>, surfaces: List<PatchSurfaceContract> = emptyList(), replay: PatchReplay? = null): BugCapsulePatch {
             if (!NativeBridge.loaded) return BugCapsulePatch(0, "runtime_missing")
             if (NativeBridge.abiVersion() != NativeBridge.ABI_VERSION) return BugCapsulePatch(0, "abi_mismatch")
             val json = JSONObject()
@@ -153,6 +156,14 @@ class BugCapsulePatch private constructor(
                         },
                     ),
                 )
+            if (replay != null) {
+                json.put(
+                    "replay",
+                    JSONObject().put("bundlePath", replay.bundlePath ?: JSONObject.NULL).apply {
+                        if (replay.keyringPath != null) put("keyringPath", replay.keyringPath).put("keyringSignaturePath", replay.keyringSignaturePath)
+                    },
+                )
+            }
             return try {
                 val payload = unpack(NativeBridge.open(json.toString().toByteArray()))
                 BugCapsulePatch(ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).long, null)
