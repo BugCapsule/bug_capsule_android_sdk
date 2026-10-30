@@ -1,0 +1,11 @@
+{
+  "runtime": "android",
+  "android": {
+    "gradleDir": "../..",
+    "module": "capsulelab",
+    "variant": "debug",
+    "applicationId": "dev.bugcapsule.capsulelab",
+    "testApplicationId": "dev.bugcapsule.capsulelab.test"
+  },
+  "timeouts": {"buildSeconds": 1200}
+}
