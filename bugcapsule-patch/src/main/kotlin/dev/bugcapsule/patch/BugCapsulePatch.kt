@@ -20,6 +20,16 @@ class PatchModule<I, O>(
     val fallback: (I) -> O,
 )
 
+/** What the installed binary can render for a surface; part of the base capability hash. */
+data class PatchSurfaceContract(
+    val id: String,
+    val components: List<String>,
+    val actions: List<String>,
+    /** Actions a layout must keep. A layout dropping one is refused. */
+    val requiredActions: List<String> = emptyList(),
+    val assets: List<String> = emptyList(),
+)
+
 enum class PatchSource { PATCHED, BUNDLED }
 
 data class PatchResult<O>(
@@ -99,6 +109,13 @@ class BugCapsulePatch private constructor(
         null
     }
 
+    /** The patched document for a registered surface, or null to use the bundled layout. */
+    fun surface(id: String): JSONObject? = try {
+        JSONObject(String(invoke(NativeBridge.OP_SURFACE, id.toByteArray())))
+    } catch (_: PatchException) {
+        null
+    }
+
     fun close() {
         if (available) NativeBridge.close(handle)
         handle = 0
@@ -113,7 +130,7 @@ class BugCapsulePatch private constructor(
 
     companion object {
         /** Opens the store and selects this process's generation. Never throws: without a runtime, every call uses the fallback. */
-        fun open(config: PatchConfig, modules: List<PatchModule<*, *>>): BugCapsulePatch {
+        fun open(config: PatchConfig, modules: List<PatchModule<*, *>>, surfaces: List<PatchSurfaceContract> = emptyList()): BugCapsulePatch {
             if (!NativeBridge.loaded) return BugCapsulePatch(0, "runtime_missing")
             if (NativeBridge.abiVersion() != NativeBridge.ABI_VERSION) return BugCapsulePatch(0, "abi_mismatch")
             val json = JSONObject()
@@ -127,6 +144,15 @@ class BugCapsulePatch private constructor(
                 .put("installationId", config.installationId)
                 .put("trustRoots", JSONArray(config.trustRoots))
                 .put("modules", JSONArray(modules.map { JSONObject().put("id", it.id).put("input", it.inputSchema).put("output", it.outputSchema) }))
+                .put(
+                    "surfaces",
+                    JSONArray(
+                        surfaces.map {
+                            JSONObject().put("id", it.id).put("components", JSONArray(it.components)).put("actions", JSONArray(it.actions))
+                                .put("requiredActions", JSONArray(it.requiredActions)).put("assets", JSONArray(it.assets))
+                        },
+                    ),
+                )
             return try {
                 val payload = unpack(NativeBridge.open(json.toString().toByteArray()))
                 BugCapsulePatch(ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).long, null)

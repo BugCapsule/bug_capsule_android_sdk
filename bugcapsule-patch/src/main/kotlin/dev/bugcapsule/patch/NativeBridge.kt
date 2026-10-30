@@ -13,6 +13,7 @@ internal object NativeBridge {
     const val OP_RECEIPTS = 9
     const val OP_ACK = 10
     const val OP_LOCAL_EVAL = 12
+    const val OP_SURFACE = 13
 
     const val ABI_VERSION = 1
 

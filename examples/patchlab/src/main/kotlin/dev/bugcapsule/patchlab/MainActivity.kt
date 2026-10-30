@@ -1,12 +1,23 @@
 package dev.bugcapsule.patchlab
 
-import android.app.Activity
 import android.os.Bundle
 import android.os.Debug
-import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import dev.bugcapsule.patch.BugCapsulePatch
 import dev.bugcapsule.patch.PatchConfig
 import dev.bugcapsule.patch.PatchModule
+import dev.bugcapsule.patch.PatchSurfaceContract
+import dev.bugcapsule.patch.compose.PatchSurfaceView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -47,7 +58,14 @@ private val coupon = PatchModule<Cart, Priced>(
 
 private val sample = Cart(listOf(Line("a", 2, 1999), Line("b", 10, 300)), 20)
 
-class MainActivity : Activity() {
+private val summarySurface = PatchSurfaceContract(
+    id = "lab.summary",
+    components = listOf("column", "row", "text", "spacer", "button"),
+    actions = listOf("lab.pay"),
+    requiredActions = listOf("lab.pay"),
+)
+
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val exchange = getExternalFilesDir(null)!!
@@ -63,6 +81,7 @@ class MainActivity : Activity() {
                 trustRoots = listOf(BuildConfig.TRUST_ANCHOR),
             ),
             listOf(coupon),
+            listOf(summarySurface),
         )
         val start = System.nanoTime()
         val result = patch.call(coupon, sample)
@@ -84,7 +103,27 @@ class MainActivity : Activity() {
             .put("inbox", inbox)
             .put("status", if (patch.available) patch.status() else JSONObject.NULL)
         File(exchange, "results.jsonl").appendText(record.toString() + "\n")
-        setContentView(TextView(this).apply { text = "Source: ${result.source}\nState: ${before.getString("state")}\nLabel: ${result.value.label}\nTotal: ${result.value.total}" })
+        val state = before.getString("state")
+        setContent {
+            MaterialTheme {
+                Surface {
+                    Column(Modifier.safeDrawingPadding().padding(16.dp)) {
+                        Text("Patch Lab · Android", style = MaterialTheme.typography.titleMedium)
+                        Text("Source: ${result.source}")
+                        Text("State: $state")
+                        Text("Label: ${result.value.label}")
+                        Text("Total: ${result.value.total}")
+                        Text("")
+                        PatchSurfaceView(patch, summarySurface.id, mapOf("lab.pay" to {})) {
+                            Column {
+                                Text("Bundled summary")
+                                Button(onClick = {}) { Text("Pay") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /** Applies whatever the delivery harness dropped. Takes effect next launch. */

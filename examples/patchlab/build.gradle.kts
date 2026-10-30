@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
@@ -24,6 +25,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        compose = true
     }
 
     buildTypes {
@@ -38,5 +40,8 @@ android {
 }
 
 dependencies {
-    implementation(project(":bugcapsule-patch"))
+    implementation(project(":bugcapsule-patch-compose"))
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.material3)
+    implementation(libs.activity.compose)
 }
