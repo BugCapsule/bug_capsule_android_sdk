@@ -69,7 +69,11 @@ data class CapsuleEvent(
     val type: String,
     val data: Map<String, Any?> = emptyMap(),
 ) {
-    fun shift(offsetMs: Long) = copy(t = t - offsetMs)
+    /** [t] and a screenshot's `capturedAtT` are on the same clock, so both move. */
+    fun shift(offsetMs: Long): CapsuleEvent {
+        val capturedAt = (data["capturedAtT"] as? Number)?.toLong() ?: return copy(t = t - offsetMs)
+        return copy(t = t - offsetMs, data = data + ("capturedAtT" to capturedAt - offsetMs))
+    }
 
     fun toJson(): Map<String, Any?> = linkedMapOf("seq" to seq, "t" to t, "type" to type, "data" to data)
 
@@ -296,6 +300,8 @@ data class CapsuleManifest(
     val monitoring: Map<String, Any?>? = null,
     /** capsule-v2 §2: interaction dependencies; non-empty makes the capsule v2. */
     val dependencies: List<CapsuleDependency> = emptyList(),
+    /** What ran when this was captured; null when no patch runtime is set up. */
+    val patch: PatchIdentity? = null,
     /** crash-capsules §2 `stats.journalGapMs`: crash time minus the last journaled event's time. */
     val journalGapMs: Long? = null,
 ) {
@@ -328,6 +334,7 @@ data class CapsuleManifest(
         if (capabilities.isNotEmpty()) it["capabilities"] = capabilities
         if (monitoring != null) it["monitoring"] = monitoring
         if (dependencies.isNotEmpty()) it["dependencies"] = dependencies.map { d -> d.toJson() }
+        if (patch != null) it["patch"] = patch.toJson()
     }
 
     companion object {
@@ -363,6 +370,7 @@ data class CapsuleManifest(
                 runtime = J.obj(j["runtime"])?.let { RuntimeInfo.fromJson(it) },
                 capabilities = (J.obj(j["capabilities"]) ?: emptyMap()).mapValues { it.value as String },
                 monitoring = J.obj(j["monitoring"]),
+                patch = J.obj(j["patch"])?.let { PatchIdentity.fromJson(it) },
                 dependencies = if (specVersion < 2) {
                     emptyList()
                 } else {

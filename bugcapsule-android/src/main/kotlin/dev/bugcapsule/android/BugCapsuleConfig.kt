@@ -83,6 +83,9 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val gitSha: String? = b.gitSha
     val gitDirty: Boolean? = b.gitDirty
     val stateSchemaVersion: Int = b.stateSchemaVersion
+
+    /** Records the running patch in capsules and pins it during replay. */
+    val patchBinding: dev.bugcapsule.android.core.PatchBinding? = b.patchBinding
     val checkpointIntervalMs: Long = b.checkpointIntervalMs
     val windowMs: Long = b.windowMs
     val maxEvents: Int = b.maxEvents
@@ -199,6 +202,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var gitSha: String? = null
         internal var gitDirty: Boolean? = null
         internal var stateSchemaVersion = 1
+        internal var patchBinding: dev.bugcapsule.android.core.PatchBinding? = null
         internal var checkpointIntervalMs = 30_000L
         internal var windowMs = 5 * 60_000L
         internal var maxEvents = 20_000
@@ -254,6 +258,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
             appVersion = c.appVersion; appBuild = c.appBuild; appId = c.appId; appName = c.appName
             flavor = c.flavor; mode = c.mode; enabled = c.enabled; backend = c.backend; token = c.token; gitSha = c.gitSha
             gitDirty = c.gitDirty; stateSchemaVersion = c.stateSchemaVersion
+            patchBinding = c.patchBinding
             checkpointIntervalMs = c.checkpointIntervalMs; windowMs = c.windowMs; maxEvents = c.maxEvents
             productionSampleRate = c.productionSampleRate; autoCaptureOnFailure = c.autoCaptureOnFailure
             maxCapsulesPerSession = c.maxCapsulesPerSession; captureNetworkBodies = c.captureNetworkBodies
@@ -291,6 +296,8 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun gitSha(v: String?) = apply { gitSha = v?.takeIf { it.isNotBlank() } }
         fun gitDirty(v: Boolean?) = apply { gitDirty = v }
         fun stateSchemaVersion(v: Int) = apply { stateSchemaVersion = v }
+
+        fun patchBinding(v: dev.bugcapsule.android.core.PatchBinding?) = apply { patchBinding = v }
         fun checkpointIntervalMs(v: Long) = apply { checkpointIntervalMs = v.coerceAtLeast(1000) }
         fun windowMs(v: Long) = apply { windowMs = v }
         fun maxEvents(v: Int) = apply { maxEvents = v }

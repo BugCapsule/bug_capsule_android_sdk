@@ -4,6 +4,7 @@ import dev.bugcapsule.android.core.Capsule
 import dev.bugcapsule.android.core.CapsuleDependency
 import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.InteractionAdapterInfo
+import dev.bugcapsule.android.core.PATCH_RUNTIME_DEPENDENCY
 import dev.bugcapsule.android.core.InteractionHandler
 import dev.bugcapsule.android.core.InteractionScript
 import dev.bugcapsule.android.core.J
@@ -166,7 +167,7 @@ class InteractionReplay @JvmOverloads constructor(
             val open = (J.list(J.obj(capsule.checkpoint.data["interactions"])?.get("open")) ?: emptyList())
                 .mapNotNull { J.obj(it) }
             for (d in capsule.manifest.dependencies) {
-                if (!d.required) continue
+                if (!d.required || d.kind == PATCH_RUNTIME_DEPENDENCY) continue
                 val installed = adapters.filter { it.adapter == d.adapter }
                 if (installed.isEmpty()) {
                     return "dependency.unsupported: ${d.adapter} schema ${d.schema} (dependency ${d.id}) has no installed adapter"
