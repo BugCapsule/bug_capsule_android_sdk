@@ -283,15 +283,21 @@ internal class Runtime(
         }
     }
 
-    /**
-     * A changed guard decision (emergency-client-v1 §7.8), any thread. It
-     * goes through the capture rules like any event; one the app's hook drops
-     * makes the capsule's decisions partial.
-     */
+    /** A changed guard decision (emergency-client-v1 §7.8), any thread. It goes through the capture rules like any event. */
     fun recordDecision(data: Map<String, Any?>) {
         if (!recording) return
-        val clean = sanitizeEvent(EventTypes.EMERGENCY_DECISION, data)
-        if (clean == null) BugCapsule.emergency.decisionDropped() else append(EventTypes.EMERGENCY_DECISION, clean)
+        usableDecision(data, sanitizeEvent(EventTypes.EMERGENCY_DECISION, data))?.let { append(EventTypes.EMERGENCY_DECISION, it) }
+    }
+
+    /**
+     * [clean], unless the capture rules dropped the decision or changed the
+     * `key` or `action` replay reads: that decision is lost, so the capsule's
+     * decisions become partial.
+     */
+    private fun usableDecision(data: Map<String, Any?>, clean: Map<String, Any?>?): Map<String, Any?>? {
+        if (clean != null && clean["key"] == data["key"] && clean["action"] == data["action"]) return clean
+        BugCapsule.emergency.decisionDropped()
+        return null
     }
 
     /** The journal header carries the capability: a crash may come before the next refresh. */
@@ -1331,7 +1337,9 @@ internal class Runtime(
                                 droppedInteraction(e)
                                 null
                             } else {
-                                sanitizeEvent(e.type, e.data, hook = false)?.let { CapsuleEvent(e.seq, e.t, e.type, it) }
+                                val clean = sanitizeEvent(e.type, e.data, hook = false)
+                                val kept = if (e.type == EventTypes.EMERGENCY_DECISION) usableDecision(e.data, clean) else clean
+                                kept?.let { CapsuleEvent(e.seq, e.t, e.type, it) }
                             }
                         },
                         checkpoint = { c ->
