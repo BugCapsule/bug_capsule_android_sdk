@@ -291,11 +291,11 @@ internal class Runtime(
 
     /**
      * [clean], unless the capture rules dropped the decision or changed the
-     * `key` or `action` replay reads: that decision is lost, so the capsule's
-     * decisions become partial.
+     * `key`, `subject` or `action` replay reads: that decision is lost, so the
+     * capsule's decisions become partial.
      */
     private fun usableDecision(data: Map<String, Any?>, clean: Map<String, Any?>?): Map<String, Any?>? {
-        if (clean != null && clean["key"] == data["key"] && clean["action"] == data["action"]) return clean
+        if (clean != null && listOf("key", "subject", "action").all { clean[it] == data[it] }) return clean
         BugCapsule.emergency.decisionDropped()
         return null
     }

@@ -267,7 +267,7 @@ class EmergencyDecisionCaptureTest {
 
     @Test
     fun aHookThatChangesTheKeyOrActionLosesTheDecision() {
-        for (field in listOf("key", "action")) {
+        for (field in listOf("key", "subject", "action")) {
             guard()
             start(hook = { type, data -> if (type == EventTypes.EMERGENCY_DECISION) data + (field to "CHANGED") else data })
             assertFalse(BugCapsule.emergency.evaluate(key).allowed)
