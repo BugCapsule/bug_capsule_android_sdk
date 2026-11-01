@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Prepare a Central Portal bundle locally; never upload it."""
-import argparse, hashlib, shutil, subprocess, zipfile
+import argparse, hashlib, json, shutil, subprocess, zipfile
+from validate_patch_runtime import validate_source, validate_aar
 from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--sign-key', help='Existing local GPG key ID; required for upload-ready bundle')
 parser.add_argument('--passphrase-file', type=Path, help='Private local passphrase file for noninteractive GPG signing; never committed')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
-subprocess.run([str(root / 'gradlew'), 'lintRelease', 'publishAll'], cwd=root, check=True)
+validate_source(root)
+subprocess.run([str(root / 'gradlew'), 'lintRelease', 'publishAll', '--max-workers=2', '--no-parallel'], cwd=root, check=True)
 props = dict(line.split('=', 1) for line in (root / 'gradle.properties').read_text().splitlines() if '=' in line and not line.startswith('#'))
 version = props['VERSION_NAME']
 repo = root / 'build/repo'
@@ -16,14 +18,18 @@ if stage.exists(): shutil.rmtree(stage)
 stage.mkdir()
 namespace = repo / props['GROUP'].replace('.', '/')
 poms = list(namespace.rglob(f'*-{version}.pom'))
-assert poms, 'No Maven publications found'
+if not poms: raise ValueError('No Maven publications found')
+for artifact in ('bugcapsule-android', 'bugcapsule-patch', 'bugcapsule-patch-compose'):
+    if not (namespace / artifact / version / f'{artifact}-{version}.pom').is_file():
+        raise ValueError(f'Missing required publication: {artifact}')
+validate_aar(namespace / 'bugcapsule-patch' / version / f'bugcapsule-patch-{version}.aar', json.loads((root / 'release/patch-runtime.json').read_text()))
 for pom in poms:
     directory = pom.parent
     # Plugin markers are POM-only; runtime modules publish AAR, Gradle plugin JAR.
     if '<packaging>pom</packaging>' not in pom.read_text():
-        assert any((directory / (pom.stem + suffix)).is_file() for suffix in ('.aar', '.jar')), f'Missing binary for {pom}'
+        if not any((directory / (pom.stem + suffix)).is_file() for suffix in ('.aar', '.jar')): raise ValueError(f'Missing binary for {pom}')
         for suffix in ('-sources.jar', '-javadoc.jar'):
-            assert (directory / (pom.stem + suffix)).is_file(), f'Missing {pom.stem + suffix}'
+            if not (directory / (pom.stem + suffix)).is_file(): raise ValueError(f'Missing {pom.stem + suffix}')
     for source in directory.iterdir():
         if source.suffix not in ('.pom', '.aar', '.jar', '.module'): continue
         target = stage / source.relative_to(repo)

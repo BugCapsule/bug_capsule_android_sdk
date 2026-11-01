@@ -1,1 +1,1 @@
-src/main/jniLibs/
+# Reviewed release JNI libraries are versioned with release/patch-runtime.json.

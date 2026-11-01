@@ -36,3 +36,35 @@ prove publication or runtime compatibility.
 Physical-device behavior, minimum OS versions, overhead and end-to-end native
 symbolication require their own evidence. Simulator/unit checks do not replace
 those checks. Each package's LICENSE is authoritative for its license.
+
+## Android patch runtime release gate
+
+For 0.4.1-beta.7, `release/patch-runtime.json` records the reviewed runtime's
+original engine commit, Rust toolchain, build-log digest and three library hashes.
+The compiled Rust inputs are unchanged at the engine commit recorded separately
+as `compiledInputsEquivalentTo`; this is source equivalence, not a rebuild claim.
+
+Set `BCPATCH_ENGINE` to that verified engine build directory and run
+`scripts/sync_patch_runtime.sh`. Reviewed native libraries are tracked so a clean
+checkout produces a complete Maven publication. Before a
+future runtime upgrade, rebuild from clean pinned inputs, review its provenance
+and update the manifest. Do not simply update hashes to accept unknown files.
+
+Run `python3 scripts/test_patch_runtime.py`, then `./gradlew
+:bugcapsule-patch:testReleaseUnitTest :bugcapsule-patch-compose:testReleaseUnitTest
+lintRelease publishAll --max-workers=2 --no-parallel`. Publication rejects missing,
+changed or incorrectly labelled ELF slices. The Central bundler independently
+checks the resulting AAR. Android API 23 is the minimum; supported JNI ABIs are
+arm64-v8a, armeabi-v7a and x86_64.
+
+Sign locally with `python3 scripts/central-bundle.py --sign-key KEY_ID
+--passphrase-file /private/path/to/passphrase`. The script never uploads. Keep
+the signing material outside the checkout. Review and verify every signature,
+then build an independent app resolving only the local Maven coordinates for
+core, patch and patch-compose before approving upload. Repeat consumer resolution
+against Central after publication. Emulator evidence does not claim a physical
+Android run.
+
+Build an independent consumer with `python3 scripts/verify_maven_consumer.py
+--output /path/to/new-consumer`. It resolves Maven coordinates and checks all
+three JNI slices in the resulting R8 release APK.
