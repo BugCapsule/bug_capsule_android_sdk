@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.4.1-beta.7 — 2026-11-01
+
+- Publish `bugcapsule-patch` and `bugcapsule-patch-compose` with signed module execution, registered Compose surfaces, HTTP delivery, health receipts and signed rollback. The runtime AAR includes arm64-v8a, armeabi-v7a and x86_64 JNI libraries. Patches only replace registered logic and surfaces.
+- Validate the runtime ABI inventory and hashes before assembling a Central bundle; record its original engine build provenance.
 
 - Capsules with screenshots are no longer rejected: `capturedAtT` now moves with the event time when a capsule is rebased to its anchor. In release builds with a first frame over 1 s the backend answered `invalid_capsule` and dropped the whole capsule.
 - Release-health sessions report `patchBaseBuildId` and `patchSetDigest`, so patch rollouts can be judged from real sessions. A session recovered on the next launch reports the patch it ran, not the current one.
