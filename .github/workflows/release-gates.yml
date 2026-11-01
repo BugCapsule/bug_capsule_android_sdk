@@ -13,7 +13,10 @@ jobs:
         with:
           packages: platform-tools
       - uses: gradle/actions/setup-gradle@v4
+      - run: python3 scripts/test_patch_runtime.py
+      - run: python3 scripts/validate_patch_runtime.py
       - run: ./gradlew test lintRelease publishAll
+      - run: python3 scripts/validate_patch_runtime.py --aar bugcapsule-patch/build/outputs/aar/bugcapsule-patch-release.aar
       - run: sh bugcapsule-ndk/src/test/native/smoke.sh
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "engineSourceCommit": "dcc08088c400bb44b634598a156ff8f3c5ff965b",
+  "compiledInputsEquivalentTo": "8dd6d43ff95c80a959799ccbe20b11ce702426bf",
+  "rustToolchain": "1.99.1",
+  "buildLogSha256": "c4686c47519bcdbd25a734fa02e650cd3aa77a8e2d31ad6f8d42fc32868441a2",
+  "files": {
+    "arm64-v8a/libbcpatch.so": "d57c8a975f1e634bb4202a56069ac00c40f292ddd0e9174b8e0e931687e8fa75",
+    "armeabi-v7a/libbcpatch.so": "fca65c24d6bf364eaff185ffe9de971b2f32b3b0761a725c166a32dca555a0d1",
+    "x86_64/libbcpatch.so": "49c7cbfddf936eeed8ca18b74af2485da95b751cb5b7b3730b25199b0e5aa5df"
+  }
+}
