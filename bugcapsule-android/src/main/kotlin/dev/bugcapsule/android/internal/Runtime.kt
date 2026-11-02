@@ -1123,6 +1123,7 @@ internal class Runtime(
             runtime = RuntimeInfo("android", host.apiLevel().toString(), "kotlin", frameworks.toList()),
             capabilities = capabilities,
             dependencies = dependencies,
+            storagePolicy = dev.bugcapsule.android.storage.StoragePolicy.of(integrations)?.toJson(),
         )
     }
 

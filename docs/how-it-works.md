@@ -277,7 +277,13 @@ dev.bugcapsule.android.replay.BugCapsuleReplayTest <testAppId>/<runner>`.
 
 `BugCapsuleReplayRunner.onCreate` (before `Application.onCreate`) fetches the
 capsule, **refuses unless the app is debuggable**, and restores
-SharedPreferences/DataStore. `BugCapsule.init` then starts in replay mode. The
+SharedPreferences/DataStore. Only files and keys the capture-time policy
+allowed are written (the manifest's `storagePolicy`, recorded from the
+`BugCapsuleSharedPreferences` / `BugCapsuleDataStore` allow and deny lists):
+names must be plain file names inside `shared_prefs` / `files/datastore`,
+BugCapsule's own `bugcapsule*` files are never written, and a capsule without
+a policy restores no storage. Each refused write is a material
+`restore.disallowed` divergence. `BugCapsule.init` then starts in replay mode. The
 test launches the launcher activity with `ActivityScenario` and runs the
 in-app engine: pointers via `Instrumentation.sendPointerSync` (dp → px, scaled
 if the screen differs), Back via `sendKeySync`, actions and text on the main
