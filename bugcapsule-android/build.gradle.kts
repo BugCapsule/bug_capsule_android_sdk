@@ -15,7 +15,7 @@ dependencies {
     // BugCapsuleDataStore bring datastore-preferences (1.1+) themselves.
     compileOnly(libs.datastore.preferences.core)
     compileOnly(libs.coroutines.core)
-    implementation("androidx.annotation:annotation:1.9.1")
+    implementation("androidx.annotation:annotation:1.11.0")
     // Frame metrics (slow/frozen frames) of screen transactions. JankStats
     // pins an old androidx.core at runtime; the app's (newer) one wins.
     implementation(libs.metrics.performance)
