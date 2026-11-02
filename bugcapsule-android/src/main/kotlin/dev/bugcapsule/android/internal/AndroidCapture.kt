@@ -222,3 +222,68 @@ internal class RecordingWindowCallback(
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onPointerCaptureChanged(hasCapture: Boolean) = delegate.onPointerCaptureChanged(hasCapture)
 }
+
+/**
+ * Activity callbacks registered before capture is prepared (BC-ENT-036): the
+ * screen tracer is built on the executor, after the first activity may have
+ * been created. Callbacks seen until then are kept (at most [MAX_PENDING],
+ * activities weakly) and replayed in order by [attach]. Main thread only.
+ */
+internal class DeferredActivityCallbacks : Application.ActivityLifecycleCallbacks {
+    private val pending = ArrayList<Pair<WeakReference<Activity>, (Application.ActivityLifecycleCallbacks, Activity) -> Unit>>()
+    private var target: Application.ActivityLifecycleCallbacks? = null
+    private var attached = false
+
+    /** Replays what was kept to [callbacks] and forwards everything after; null drops it all. */
+    fun attach(callbacks: Application.ActivityLifecycleCallbacks?) {
+        if (attached) return
+        attached = true
+        target = callbacks
+        val kept = pending.toList()
+        pending.clear()
+        if (callbacks == null) return
+        for ((ref, call) in kept) {
+            val activity = ref.get() ?: continue
+            guard { call(callbacks, activity) }
+        }
+    }
+
+    private fun forward(activity: Activity, call: (Application.ActivityLifecycleCallbacks, Activity) -> Unit) {
+        val t = target
+        if (t != null) {
+            guard { call(t, activity) }
+        } else if (!attached && pending.size < MAX_PENDING) {
+            pending.add(WeakReference(activity) to call)
+        }
+    }
+
+    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) =
+        forward(activity) { c, a -> c.onActivityCreated(a, savedInstanceState) }
+
+    override fun onActivityStarted(activity: Activity) = forward(activity) { c, a -> c.onActivityStarted(a) }
+
+    override fun onActivityResumed(activity: Activity) = forward(activity) { c, a -> c.onActivityResumed(a) }
+
+    override fun onActivityPaused(activity: Activity) = forward(activity) { c, a -> c.onActivityPaused(a) }
+
+    override fun onActivityStopped(activity: Activity) = forward(activity) { c, a -> c.onActivityStopped(a) }
+
+    // Not kept: a saved state is only meaningful right away.
+    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {
+        target?.let { t -> guard { t.onActivitySaveInstanceState(activity, outState) } }
+    }
+
+    override fun onActivityDestroyed(activity: Activity) = forward(activity) { c, a -> c.onActivityDestroyed(a) }
+
+    private inline fun guard(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Throwable) {
+            SdkLog.once("screen tracing callback failed: $e")
+        }
+    }
+
+    companion object {
+        const val MAX_PENDING = 64
+    }
+}

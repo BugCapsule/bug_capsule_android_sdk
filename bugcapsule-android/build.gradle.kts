@@ -42,3 +42,8 @@ tasks.withType<Test>().configureEach {
         rootProject.file("../bug_capsule_flutter_sdk/spec/fixtures").absolutePath,
     )
 }
+
+// StartupTest installs a SecurityManager to prove BugCapsule.init touches no file on the calling thread.
+tasks.withType<Test>().configureEach {
+    jvmArgs("-Djava.security.manager=allow")
+}

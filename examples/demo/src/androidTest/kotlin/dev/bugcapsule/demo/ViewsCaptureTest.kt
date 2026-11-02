@@ -63,6 +63,10 @@ class ViewsCaptureTest {
                 pressBack()
             }
             onView(withId(R.id.coupon)).perform(typeText("SAVE100"), click(), closeSoftKeyboard())
+            // Before API 30 the window insets report the keyboard closed a
+            // little after closeSoftKeyboard returns; tap only once they do,
+            // since the pointer event records what the insets say.
+            awaitKeyboardHidden(scenario)
             onView(withId(R.id.apply_coupon)).perform(click())
             val file = awaitNewCapture(before)
             val capsule = CapsuleCodec.decode(file.readBytes())
@@ -88,6 +92,20 @@ class ViewsCaptureTest {
             assertTrue(m.capabilities["network.okhttp"] == "supported")
         }
         assertTrue("monitoring envelopes flush before test uninstall", BugCapsule.flush(15_000))
+    }
+
+    private fun awaitKeyboardHidden(scenario: ActivityScenario<MainActivity>) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline) {
+            var visible = true
+            scenario.onActivity { a ->
+                visible = androidx.core.view.ViewCompat.getRootWindowInsets(a.window.decorView)
+                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) ?: false
+            }
+            if (!visible) return
+            Thread.sleep(50)
+        }
+        throw AssertionError("the keyboard did not close")
     }
 
     private fun awaitNewCapture(before: Set<String>): File {

@@ -35,6 +35,7 @@ class BodyDefaultsTest {
         val b = BugCapsuleConfig.builder().mode(mode).productionSampleRate(1.0).captureNetworkBodies(explicit)
         if (remote != null) b.backend("https://backend.test", "bci_test_key_000000000000000")
         BugCapsule.init(app, b.build())
+        awaitPrepared()
         if (remote != null) BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
         return BugCapsule.session!!.captureNetworkBodies
     }
