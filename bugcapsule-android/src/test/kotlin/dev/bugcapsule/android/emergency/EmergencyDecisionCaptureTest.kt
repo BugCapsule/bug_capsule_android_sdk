@@ -126,7 +126,7 @@ class EmergencyDecisionCaptureTest {
         )
         BugCapsule.emergency.initialize(
             app,
-            EmergencyConfig.builder().trustAnchor(signer.anchor()).backend("http://backend.test", "bct_test_key_0123456789")
+            EmergencyConfig.builder().trustAnchor(signer.anchor()).backend("https://backend.test", "bct_test_key_0123456789")
                 .updateProvider(provider).build(),
         )
     }
@@ -296,7 +296,7 @@ class EmergencyDecisionCaptureTest {
     fun aRemoteRuleOnTheKeyLosesBufferedDecisionsAndSaysSo() {
         guard()
         val remote = CaptureTransport()
-        start(capture = remote) { backend("http://backend.test", "bci_test_key_000000000000000") }
+        start(capture = remote) { backend("https://backend.test", "bci_test_key_000000000000000") }
         BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
         BugCapsule.emergency.evaluate(key)
         assertEquals("supported", journalCapability())

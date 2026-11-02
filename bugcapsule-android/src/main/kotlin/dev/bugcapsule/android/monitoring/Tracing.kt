@@ -382,12 +382,25 @@ object TraceHeaders {
     }
 }
 
-/** `tracePropagationTargets` matching: plain strings are substrings, `/.../` strings are regular expressions. */
+/**
+ * `tracePropagationTargets` matching: plain strings are substrings, `/.../`
+ * strings are regular expressions.
+ */
 object PropagationTargets {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, Pattern>()
 
+    /**
+     * [targets] come from the app. [narrowedBy] (the server's list) can only
+     * remove destinations: a URL must match both. Its entries are plain
+     * substrings, never patterns, so a server can't add hosts or run a regex
+     * on every request URL.
+     */
     @JvmStatic
-    fun matches(url: String, targets: List<String>): Boolean = targets.any { target ->
+    @JvmOverloads
+    fun matches(url: String, targets: List<String>, narrowedBy: List<String>? = null): Boolean =
+        matchesApp(url, targets) && (narrowedBy == null || narrowedBy.any { it.isNotEmpty() && url.contains(it) })
+
+    private fun matchesApp(url: String, targets: List<String>): Boolean = targets.any { target ->
         if (target.length > 2 && target.startsWith("/") && target.endsWith("/")) {
             val p = try {
                 cache.getOrPut(target) { Pattern.compile(target.substring(1, target.length - 1)) }

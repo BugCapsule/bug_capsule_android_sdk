@@ -473,7 +473,7 @@ internal class Runtime(
             synchronized(lock) {
                 recorder = FlightRecorder(launch, config.maxEvents, config.windowMs)
                 if (journalDir != null) {
-                    journal = CrashJournal(journalDir, { 2 * maxCapsuleBytes }).also { it.checkpoint(launch, 0) }
+                    journal = CrashJournal(journalDir, { journalLimit(maxCapsuleBytes) }).also { it.checkpoint(launch, 0) }
                 }
             }
             recording = true
@@ -1739,6 +1739,10 @@ internal class Runtime(
         )
     }
 }
+
+/** Crash journal size limit: twice the capsule limit, without overflowing. */
+internal fun journalLimit(maxCapsuleBytes: Long): Long =
+    if (maxCapsuleBytes > Long.MAX_VALUE / 2) Long.MAX_VALUE else 2 * maxCapsuleBytes.coerceAtLeast(0)
 
 /**
  * Chained default handler: records the failure (capture: synchronous crash

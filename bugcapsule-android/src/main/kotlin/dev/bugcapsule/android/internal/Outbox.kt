@@ -5,6 +5,9 @@ import java.io.File
 import java.io.IOException
 import java.util.Random
 
+/** Longest `Retry-After` the outbox honours (a day); a larger value comes from a misbehaving server. */
+internal const val MAX_RETRY_AFTER_MS = 24L * 60 * 60 * 1000
+
 class OutboxEntry(val file: File, val capsuleId: String, val enqueuedAtMs: Long, val size: Long)
 
 /**
@@ -16,7 +19,7 @@ class OutboxEntry(val file: File, val capsuleId: String, val enqueuedAtMs: Long,
  * * **Writes** are atomic; temp files left by a crash are removed on start.
  *   Disk-full and other I/O errors drop the capsule.
  * * **Upload**: oldest first, one at a time. A retryable failure stops the
- *   pass and backs off from 30 s to 1 h (or `Retry-After`) with ±20 % jitter;
+ *   pass and backs off from 30 s to 1 h (or `Retry-After`, at most 24 h) with ±20 % jitter;
  *   permanent rejections and corrupt files are deleted.
  * * File operations share one lock; uploads run outside it.
  */
@@ -135,7 +138,8 @@ class UploadOutbox(
                 val base = 30_000L * (1L shl minOf(failures - 1, 7))
                 var delay = minOf(base, 3_600_000L)
                 val after = result.retryAfterMs
-                if (after != null && after > delay) delay = after
+                // Honour Retry-After, but never park the outbox for more than a day.
+                if (after != null && after > delay) delay = minOf(after, MAX_RETRY_AFTER_MS)
                 retryAtMs = nowMs() + Math.round(delay * (0.8 + random.nextDouble() * 0.4))
                 break
             }

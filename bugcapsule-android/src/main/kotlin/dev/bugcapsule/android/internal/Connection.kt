@@ -19,14 +19,21 @@ internal class ResolvedConnection(
 
 /**
  * Turns `token` into `backend` (connection token v1). An explicit `backend`
- * wins; an unusable token leaves no backend, so the app runs without the
+ * wins; an unusable token, or an explicit backend with a `bcs_` key or plain
+ * http to a non-local host, leaves no backend, so the app runs without the
  * backend instead of failing. Offline, never throws, logs at most one line.
  */
 internal object ConnectionResolver {
     fun resolve(config: BugCapsuleConfig): Pair<BugCapsuleConfig, ResolvedConnection> {
         val token = config.token
-        if (config.backend != null) {
+        val backend = config.backend
+        if (backend != null) {
             if (!token.isNullOrBlank()) SdkLog.w("both token and backend are set; using backend and ignoring token")
+            val refusal = ConnectionToken.explicitBackendRefusal(backend)
+            if (refusal != null) {
+                SdkLog.e("backend config refused: $refusal. The app runs without BugCapsule's backend.")
+                return config.toBuilder().backend(null).build() to ResolvedConnection.NONE
+            }
             return config to ResolvedConnection(ConnectionSource.BACKEND)
         }
         if (token == null) return config to ResolvedConnection.NONE

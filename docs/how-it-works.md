@@ -174,7 +174,9 @@ capsule rules before it is written.**
 Remote settings: `monitoringEnabled: false` stops envelopes and deletes queued
 ones (capsules unaffected); `errorSampleRate`, `tracesSampleRate` (overrides
 the app's rate unless it set a `tracesSampler`), `sessionTracking`,
-`maxBreadcrumbs`, `tracePropagationTargets` (replaces the app's list).
+`maxBreadcrumbs`, `tracePropagationTargets` (can only narrow the app's list:
+a URL must match the app's list and contain one of the server's entries, which
+are plain substrings, never patterns).
 
 ### Native crashes (`bugcapsule-ndk`)
 
@@ -528,7 +530,7 @@ never captured).
 - Uploads happen only after a successful config fetch, or with a cached one
   younger than 7 days.
 - Outbox: 10 capsules / 10 MiB / 7 days, oldest evicted first.
-- Retries: 30 s → 1 h with ±20 % jitter and `Retry-After` for network errors,
+- Retries: 30 s → 1 h with ±20 % jitter and `Retry-After` (at most 24 h) for network errors,
   timeouts and temporary server errors; a capsule BugCapsule refuses is
   dropped.
 - Remote config is cached per address and credential, refreshed after its TTL

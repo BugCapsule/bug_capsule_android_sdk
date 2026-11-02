@@ -79,7 +79,41 @@ object ConnectionToken {
 
     private fun invalid(message: String) = ParsedConnectionToken.Invalid(ConnectionTokenError.INVALID_TOKEN, message)
 
-    /** An absolute http(s) URL without user info, query or fragment; trailing slashes removed. */
+    /**
+     * Hosts plain http may reach: loopback, and the emulator's alias for the
+     * development machine. Anything else must be https, because the ingest
+     * credential travels in every request.
+     */
+    internal fun isLocalDevelopmentHost(host: String): Boolean {
+        val h = host.lowercase()
+        return h == "localhost" || h == "[::1]" || h == "::1" || h == "10.0.2.2" ||
+            Regex("^127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$").matches(h)
+    }
+
+    /**
+     * Why an explicit backend config can't be used, or null when it can. The
+     * ingest key travels in every request, so it needs https except on a local
+     * development host, and a `bcs_` secret key must never ship in an app.
+     */
+    internal fun explicitBackendRefusal(backend: BugCapsuleBackendConfig): String? {
+        if (backend.ingestKey.startsWith("bcs_")) return "a bcs_ secret key is not an ingest key; use an SDK token"
+        val uri = try {
+            URI(backend.url)
+        } catch (_: Exception) {
+            null
+        }
+        val scheme = uri?.scheme?.lowercase()
+        val host = uri?.host
+        if (uri == null || uri.isOpaque || host.isNullOrEmpty() || (scheme != "https" && scheme != "http")) {
+            return "url must be an absolute https URL"
+        }
+        if (scheme == "http" && !isLocalDevelopmentHost(host)) {
+            return "plain http is only allowed to localhost, 127.0.0.1 or 10.0.2.2; use https"
+        }
+        return null
+    }
+
+    /** An absolute https URL (http only to a local development host) without user info, query or fragment; trailing slashes removed. */
     private fun apiUrl(api: Any?): String? {
         if (api !is String || api.isEmpty() || api.length > 2000) return null
         val uri = try {
@@ -92,6 +126,7 @@ object ConnectionToken {
         val authority = uri.rawAuthority
         if (uri.isOpaque || authority.isNullOrEmpty() || authority.contains('@')) return null
         if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) return null
+        if (scheme == "http" && !isLocalDevelopmentHost(uri.host ?: return null)) return null
         val url = api.trimEnd('/')
         return url.takeIf { it.length > scheme.length + 3 }
     }
