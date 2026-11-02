@@ -66,8 +66,10 @@ class CaptureResult(
  * App Startup initializer): replay restores storage right before
  * `Application.onCreate`. BugCapsule never stops the app from starting: if
  * setup fails, or the token can't be used, the app runs without capture /
- * without the backend, and [status] says why. Network work never runs on
- * the calling thread.
+ * without the backend, and [status] says why. Network and disk work never
+ * run on the calling thread: [init] returns before the SDK's files are read,
+ * and what the app records, logs or sets on the scope meanwhile is applied
+ * once they are.
  */
 object BugCapsule {
     @Volatile
@@ -160,8 +162,13 @@ object BugCapsule {
     @JvmStatic
     val isReplaying: Boolean get() = runtime?.isReplaying ?: false
 
+    /**
+     * True once this session records capsules. [init] returns before
+     * recording starts: the SDK's files are read in the background, and
+     * events recorded meanwhile are kept in memory and recorded once it starts.
+     */
     @JvmStatic
-    val isRecording: Boolean get() = runtime?.isRecording ?: false
+    val isRecording: Boolean get() = runtime?.recordingStarted ?: false
 
     @JvmStatic
     val mode: CaptureMode? get() = runtime?.mode
@@ -415,22 +422,28 @@ object BugCapsule {
     /**
      * Sends [error] as an error event (mechanism `manual`, handled) without
      * recording a failure or writing a capsule. Returns the event id, or
-     * null when monitoring is off, the event was sampled out or dropped.
+     * null when monitoring is off, the event was sampled out or dropped, or
+     * BugCapsule is still starting (the event is then sent once it started).
      */
     @JvmStatic
     @JvmOverloads
-    fun captureException(error: Throwable, options: CaptureOptions? = null): String? =
-        runtime?.monitoring?.captureException(
-            error,
-            dev.bugcapsule.android.monitoring.ExceptionMapper.Mechanism("manual", true),
-            options,
-        )?.eventId
+    fun captureException(error: Throwable, options: CaptureOptions? = null): String? {
+        val rt = runtime ?: return null
+        val mechanism = dev.bugcapsule.android.monitoring.ExceptionMapper.Mechanism("manual", true)
+        rt.monitoring?.let { return it.captureException(error, mechanism, options)?.eventId }
+        rt.withMonitoring { it.captureException(error, mechanism, options) } // during startup: sent once prepared
+        return null
+    }
 
     /** Sends a message event (the calling thread's stack is attached unless `attachStacktrace` is off). */
     @JvmStatic
     @JvmOverloads
-    fun captureMessage(message: String, level: Level = Level.INFO, options: CaptureOptions? = null): String? =
-        runtime?.monitoring?.captureMessage(message, level, options)?.eventId
+    fun captureMessage(message: String, level: Level = Level.INFO, options: CaptureOptions? = null): String? {
+        val rt = runtime ?: return null
+        rt.monitoring?.let { return it.captureMessage(message, level, options)?.eventId }
+        rt.withMonitoring { it.captureMessage(message, level, options) } // during startup: sent once prepared
+        return null
+    }
 
     /**
      * Sends user feedback (monitoring-v1 §9). [eventId] links it to an
@@ -459,7 +472,7 @@ object BugCapsule {
     /** Changes the global scope. */
     @JvmStatic
     fun configureScope(callback: ScopeCallback) {
-        runtime?.monitoring?.scope?.let { callback.configure(it) }
+        runtime?.withMonitoring { callback.configure(it.scope) }
     }
 
     /** Runs [callback] with a temporary copy of the scope: events captured inside on this thread use it. */
@@ -496,7 +509,7 @@ object BugCapsule {
     /** Adds a breadcrumb (after `beforeBreadcrumb`). Recorded events become breadcrumbs automatically. */
     @JvmStatic
     fun addBreadcrumb(breadcrumb: Breadcrumb) {
-        runtime?.monitoring?.addBreadcrumb(breadcrumb)
+        runtime?.withMonitoring { it.addBreadcrumb(breadcrumb) }
     }
 
     @JvmStatic
@@ -562,12 +575,12 @@ object BugCapsule {
     /** Starts a release-health session now (sessions are otherwise automatic). */
     @JvmStatic
     fun startSession() {
-        runtime?.monitoring?.sessions?.start()
+        runtime?.withMonitoring { it.sessions?.start() }
     }
 
     @JvmStatic
     fun endSession() {
-        runtime?.monitoring?.sessions?.end()
+        runtime?.withMonitoring { it.sessions?.end() }
     }
 
     /**

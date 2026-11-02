@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.monitoring
 
 import android.app.Activity
+import dev.bugcapsule.android.internal.awaitPrepared
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import dev.bugcapsule.android.BugCapsule
@@ -99,6 +100,7 @@ class MonitoringIntegrationTest {
             .redactKeys("loyaltyId")
         b.configure()
         BugCapsule.init(app, b.build())
+        awaitPrepared()
         BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
     }
 
