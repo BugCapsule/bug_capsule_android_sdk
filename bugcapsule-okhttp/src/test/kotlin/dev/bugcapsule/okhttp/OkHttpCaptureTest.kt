@@ -69,11 +69,17 @@ class OkHttpCaptureTest {
         assertEquals(listOf(0, 1, 2), session.awaitHttp(3).map { it["occurrence"] })
     }
 
+    /** A client whose interceptor records binary bodies as base64 (`captureBinaryBodies`). */
+    private fun binaryClient(): OkHttpClient {
+        val withBinary = BugCapsuleOkHttp(maxBinaryBytes = 64, captureBinaryBodies = true).also { it.setUp(session) }
+        return OkHttpClient.Builder().addInterceptor(withBinary.interceptor).build()
+    }
+
     @Test
     fun largeBodiesStreamUntouchedAndAreRecordedTruncated() {
         val big = ByteArray(200_000) { (it % 251).toByte() }
         server.enqueue(MockResponse().setBody(Buffer().write(big)).setHeader("Content-Type", "application/octet-stream"))
-        val received = client.newCall(Request.Builder().url(url("/big")).build()).execute().use { it.body!!.bytes() }
+        val received = binaryClient().newCall(Request.Builder().url(url("/big")).build()).execute().use { it.body!!.bytes() }
         assertArrayEquals(big, received)
         val e = session.awaitHttp(1).single()
         assertEquals("truncated", e["bodyEncoding"])
@@ -81,9 +87,38 @@ class OkHttpCaptureTest {
     }
 
     @Test
-    fun smallBinaryIsBase64() {
+    fun binaryBodiesKeepOnlySizeAndContentTypeByDefault() {
+        val big = ByteArray(200_000) { (it % 251).toByte() }
+        server.enqueue(MockResponse().setBody(Buffer().write(big)).setHeader("Content-Type", "application/octet-stream"))
         server.enqueue(MockResponse().setBody(Buffer().write(byteArrayOf(1, 2, 3))).setHeader("Content-Type", "image/png"))
+        // Declared text that is not UTF-8.
+        server.enqueue(MockResponse().setBody(Buffer().write(byteArrayOf(0xC3.toByte(), 0x28))).setHeader("Content-Type", "text/plain"))
+        val received = client.newCall(Request.Builder().url(url("/big")).build()).execute().use { it.body!!.bytes() }
+        assertArrayEquals("the app still gets every byte", big, received)
         client.newCall(Request.Builder().url(url("/img")).build()).execute().use { it.body!!.bytes() }
+        val upload = byteArrayOf(9, 8, 7, 6).toRequestBody("application/octet-stream".toMediaType())
+        client.newCall(Request.Builder().url(url("/latin")).post(upload).build()).execute().use { it.body!!.bytes() }
+        val (bigE, img, latin) = session.awaitHttp(3)
+        assertEquals("omitted", bigE["bodyEncoding"])
+        assertEquals(200_000L, bigE["responseBodyBytes"])
+        assertEquals("application/octet-stream", bigE["responseContentType"])
+        assertEquals("omitted", img["bodyEncoding"])
+        assertNull(img["responseBody"])
+        assertEquals(3L, img["responseBodyBytes"])
+        assertEquals("image/png", img["responseContentType"])
+        assertEquals("omitted", latin["bodyEncoding"])
+        assertEquals(2L, latin["responseBodyBytes"])
+        assertEquals("omitted", latin["requestEncoding"])
+        assertNull(latin["requestBody"])
+        assertEquals(4, latin["requestBodyBytes"])
+        assertEquals("application/octet-stream", latin["requestContentType"])
+        assertTrue("the key still hashes the body, as replay does", (latin["key"] as String).contains("#"))
+    }
+
+    @Test
+    fun smallBinaryIsBase64WhenOptedIn() {
+        server.enqueue(MockResponse().setBody(Buffer().write(byteArrayOf(1, 2, 3))).setHeader("Content-Type", "image/png"))
+        binaryClient().newCall(Request.Builder().url(url("/img")).build()).execute().use { it.body!!.bytes() }
         val e = session.awaitHttp(1).single()
         assertEquals("base64", e["bodyEncoding"])
         assertEquals("AQID", e["responseBody"])

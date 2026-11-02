@@ -497,6 +497,20 @@ Redaction runs on the device before anything is written: sensitive keys in
 bodies, storage, state and payloads; sensitive headers; credentials in URLs;
 and tokens, JWTs, API keys and card numbers in free text.
 
+What is captured by default:
+
+| | Production mode | Debug / QA mode |
+|---|---|---|
+| HTTP request/response bodies | off | on (redacted) |
+| Binary or non-UTF-8 bodies | size and content type only | size and content type only |
+| SQL in `db.sql.query` spans | literals replaced by `?` | literals replaced by `?` |
+
+`captureNetworkBodies(true|false)` overrides the mode default either way;
+remote config can only turn bodies off. `BugCapsuleOkHttp(captureBinaryBodies
+= true)` records binary bodies up to `maxBinaryBytes` as base64. A capsule
+without bodies still replays: responses come back empty with a
+`network.noBody` divergence, and eligibility lists `network.bodies`.
+
 Tighten it with `redactKeys`, `redactHeaders`, `redactPattern(...)`,
 `beforeRecord` / `beforeCheckpoint` and `BugCapsuleOkHttp(exclude = …)`.
 Storage is captured only when you allowlist it, and password input types are

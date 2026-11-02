@@ -118,6 +118,32 @@ class OkHttpReplayTest {
     }
 
     @Test
+    fun bodilessFixturesStillReplayAndEligibilitySaysSo() {
+        // What production capture records by default: no body, only its size and type.
+        val bodiless = CapsuleEvent(1, 10, "http", linkedMapOf(
+            "key" to "GET api.test/img", "occurrence" to 0L, "status" to 200L, "durationMs" to 0L,
+            "responseHeaders" to mapOf("content-type" to "image/png"),
+            "responseBody" to null, "bodyEncoding" to "omitted", "responseBodyBytes" to 3L, "responseContentType" to "image/png",
+        ))
+        val r = replay(bodiless)
+        assertEquals(200 to "", get("https://api.test/img"))
+        assertTrue(r.divergences.any { it.type == "network.noBody" && it.detail == "GET api.test/img" })
+        val eligibility = dev.bugcapsule.android.core.EligibilityBuilder()
+        bugCapsule.describeEligibility(
+            eligibility,
+            dev.bugcapsule.android.core.RecordedWindow(
+                dev.bugcapsule.android.core.Checkpoint(dev.bugcapsule.android.core.CheckpointKind.LAUNCH, 0, 0, 0),
+                listOf(bodiless),
+                0,
+                false,
+            ),
+        )
+        val missing = eligibility.build().missing.single()
+        assertEquals("network.bodies", missing.dependency)
+        assertTrue(missing.reason, missing.reason.contains("1 recorded responses have no body"))
+    }
+
+    @Test
     fun cancellationStopsTheDelay() {
         replay(fixture(1, "GET api.test/long", 0, mapOf("x" to 1L), durationMs = 5000))
         val call = client.newCall(Request.Builder().url("https://api.test/long").build())
