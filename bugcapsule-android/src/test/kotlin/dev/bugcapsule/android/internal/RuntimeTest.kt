@@ -128,6 +128,11 @@ class RuntimeTest {
         val prefs = (capsule.checkpoint.data["shared_preferences"] as Map<*, *>)["prefs"] as Map<*, *>
         assertEquals(mapOf("type" to "int", "value" to 3L), prefs["visits"])
         assertTrue(capsule.manifest.eligibility.missing.any { it.dependency == "storage.prefs/api_token" })
+        // The capture policy travels with the capsule, for early restore.
+        assertEquals(
+            mapOf("shared_preferences" to mapOf("prefs" to mapOf("allow" to listOf(""), "deny" to emptyList<String>()))),
+            capsule.manifest.storagePolicy,
+        )
     }
 
     @Test
