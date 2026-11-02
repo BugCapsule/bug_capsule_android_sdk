@@ -132,7 +132,7 @@ internal class Runtime(
     private var recording = false
 
     @Volatile
-    private var captureBodies = true
+    private var captureBodies = false // Set at start from appCapturesBodies and the cached remote config.
 
     @Volatile
     private var maxCapsuleBytes = 5L * 1024 * 1024
@@ -210,6 +210,9 @@ internal class Runtime(
     override val isReplaying: Boolean get() = engine != null
     override val redactor: Redactor get() = currentRedactor
     override val captureNetworkBodies: Boolean get() = captureBodies
+
+    /** The app's body setting: explicit, else off in production and on in debug/QA. Remote config can only lower it. */
+    private val appCapturesBodies: Boolean get() = config.captureNetworkBodies ?: (mode != CaptureMode.PRODUCTION)
     override val maxBodyBytes: Int get() = config.maxBodyBytes
     override val applicationContext: Context get() = host.context
     override val replay: ReplayContext? get() = engine
@@ -433,7 +436,7 @@ internal class Runtime(
         }
         val cached = remote?.current
         currentRedactor = baseRedactor(cached?.redactKeys ?: emptyList())
-        captureBodies = config.captureNetworkBodies && (cached?.captureNetworkBodies ?: true)
+        captureBodies = appCapturesBodies && (cached?.captureNetworkBodies ?: true)
         maxCapsuleBytes = cached?.maxCapsuleBytes ?: maxCapsuleBytes
         interactionRecorder.limits = interactionLimits(cached)
         val record = decideRecording(cached)
@@ -1314,7 +1317,7 @@ internal class Runtime(
                 }
             }
         }
-        val bodies = config.captureNetworkBodies && next.captureNetworkBodies
+        val bodies = appCapturesBodies && next.captureNetworkBodies
         var rewritten = false
         if (captureBodies && !bodies) {
             rewritten = true

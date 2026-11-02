@@ -38,7 +38,10 @@ coroutine exceptions reach the default handler).
 - **Navigation** destinations (`route`, `source: "navigation"`).
 - **Network**: OkHttp exchanges; the response body source is tapped while the
   app reads it (same bytes and timing), keeping a bounded prefix (256 KiB text,
-  64 KiB binary); one-shot/duplex request bodies are never read.
+  64 KiB binary); one-shot/duplex request bodies are never read. Bodies are
+  off by default in production mode (`captureNetworkBodies` overrides), and
+  binary or non-UTF-8 bodies keep only their size and content type unless
+  `BugCapsuleOkHttp(captureBinaryBodies = true)`.
 - **WebSockets** (`BugCapsuleWebSockets`, `bugcapsule-okhttp`) and **native
   SDK adapters** (`NativeAdapter`): see
   [Interaction dependencies](#interaction-dependencies).

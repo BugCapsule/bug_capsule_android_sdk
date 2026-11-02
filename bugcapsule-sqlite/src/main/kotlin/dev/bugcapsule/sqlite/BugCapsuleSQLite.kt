@@ -15,7 +15,8 @@ import dev.bugcapsule.android.monitoring.SpanStatus
  * SQLite / Room spans (monitoring-v1 §8, `db.sql.query`): wraps a
  * [SupportSQLiteOpenHelper.Factory] so every query, statement and
  * insert/update/delete running while a span is active becomes a child span
- * (description = the SQL; bound arguments are never recorded).
+ * (description = the SQL with string, number and blob literals replaced by
+ * `?` and comments removed; bound arguments are never recorded).
  *
  * ```kotlin
  * Room.databaseBuilder(context, ShopDb::class.java, "shop.db")
@@ -50,7 +51,7 @@ internal object DbSpans {
     }
 
     private fun start(sql: String, dbName: String?): Span? = try {
-        BugCapsule.activeSpan()?.takeIf { !it.isFinished }?.startChild("db.sql.query", sql.trim().take(2000))?.also {
+        BugCapsule.activeSpan()?.takeIf { !it.isFinished }?.startChild("db.sql.query", SqlText.withoutLiterals(sql).trim().take(2000))?.also {
             it.setData("db.system", "sqlite")
             if (dbName != null) it.setData("db.name", dbName)
         }
@@ -102,4 +103,72 @@ internal class TracingStatement(
     override fun executeInsert(): Long = DbSpans.trace(sql, dbName) { delegate.executeInsert() }
     override fun simpleQueryForLong(): Long = DbSpans.trace(sql, dbName) { delegate.simpleQueryForLong() }
     override fun simpleQueryForString(): String? = DbSpans.trace(sql, dbName) { delegate.simpleQueryForString() }
+}
+
+/**
+ * SQL for span descriptions: literal values become `?`, so data typed into
+ * a statement (`WHERE email = 'a@b.c'`) never leaves the device, while the
+ * statement's shape (keywords, identifiers, parameters) stays.
+ */
+internal object SqlText {
+    fun withoutLiterals(sql: String): String {
+        val out = StringBuilder(sql.length)
+        var i = 0
+        val n = sql.length
+        fun identChar(c: Char) = c.isLetterOrDigit() || c == '_' || c == '$'
+        while (i < n) {
+            val c = sql[i]
+            when {
+                // 'string' ('' escapes a quote) and X'blob'.
+                c == '\'' || ((c == 'x' || c == 'X') && i + 1 < n && sql[i + 1] == '\'' && (i == 0 || !identChar(sql[i - 1]))) -> {
+                    i = if (c == '\'') i + 1 else i + 2
+                    while (i < n) {
+                        if (sql[i] == '\'') {
+                            if (i + 1 < n && sql[i + 1] == '\'') i += 2 else break
+                        } else {
+                            i++
+                        }
+                    }
+                    i++ // closing quote
+                    out.append('?')
+                }
+                // Quoted identifiers stay as they are.
+                c == '"' || c == '`' || c == '[' -> {
+                    val close = if (c == '[') ']' else c
+                    val end = sql.indexOf(close, i + 1).let { if (it < 0) n - 1 else it }
+                    out.append(sql, i, end + 1)
+                    i = end + 1
+                }
+                c == '-' && i + 1 < n && sql[i + 1] == '-' -> {
+                    val end = sql.indexOf('\n', i).let { if (it < 0) n else it }
+                    i = end
+                    out.append(' ')
+                }
+                c == '/' && i + 1 < n && sql[i + 1] == '*' -> {
+                    val end = sql.indexOf("*/", i + 2).let { if (it < 0) n else it + 2 }
+                    i = end
+                    out.append(' ')
+                }
+                // Numbers not part of an identifier or a numbered parameter (?1, :p1, $1).
+                (c.isDigit() || (c == '.' && i + 1 < n && sql[i + 1].isDigit())) &&
+                    (i == 0 || !(identChar(sql[i - 1]) || sql[i - 1] == '?' || sql[i - 1] == ':' || sql[i - 1] == '@')) -> {
+                    i++
+                    while (i < n && (sql[i].isLetterOrDigit() || sql[i] == '.' || sql[i] == '_' ||
+                            ((sql[i] == '+' || sql[i] == '-') && (sql[i - 1] == 'e' || sql[i - 1] == 'E')))
+                    ) i++
+                    out.append('?')
+                }
+                identChar(c) -> {
+                    val start = i
+                    while (i < n && identChar(sql[i])) i++
+                    out.append(sql, start, i)
+                }
+                else -> {
+                    out.append(c)
+                    i++
+                }
+            }
+        }
+        return out.toString()
+    }
 }

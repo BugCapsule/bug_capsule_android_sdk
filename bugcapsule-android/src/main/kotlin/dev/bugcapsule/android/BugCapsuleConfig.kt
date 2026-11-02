@@ -94,7 +94,12 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val productionSampleRate: Double = b.productionSampleRate
     val autoCaptureOnFailure: Boolean = b.autoCaptureOnFailure
     val maxCapsulesPerSession: Int = b.maxCapsulesPerSession
-    val captureNetworkBodies: Boolean = b.captureNetworkBodies
+    /**
+     * Whether HTTP request/response bodies are recorded. Null (the default)
+     * follows the mode: off in production, on in debug and QA. An explicit
+     * true or false always wins; remote config can only turn bodies off.
+     */
+    val captureNetworkBodies: Boolean? = b.captureNetworkBodies
     val maxBodyBytes: Int = b.maxBodyBytes
     val redactKeys: List<String> = b.redactKeys.toList()
     val redactHeaders: List<String> = b.redactHeaders.toList()
@@ -209,7 +214,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var productionSampleRate = 0.1
         internal var autoCaptureOnFailure = true
         internal var maxCapsulesPerSession = 3
-        internal var captureNetworkBodies = true
+        internal var captureNetworkBodies: Boolean? = null
         internal var maxBodyBytes = 256 * 1024
         internal val redactKeys = ArrayList<String>()
         internal val redactHeaders = ArrayList<String>()
@@ -304,7 +309,8 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun productionSampleRate(v: Double) = apply { productionSampleRate = v }
         fun autoCaptureOnFailure(v: Boolean) = apply { autoCaptureOnFailure = v }
         fun maxCapsulesPerSession(v: Int) = apply { maxCapsulesPerSession = v }
-        fun captureNetworkBodies(v: Boolean) = apply { captureNetworkBodies = v }
+        /** Records HTTP bodies (true) or never (false); null follows the mode (off in production). */
+        fun captureNetworkBodies(v: Boolean?) = apply { captureNetworkBodies = v }
         fun maxBodyBytes(v: Int) = apply { maxBodyBytes = v }
         fun redactKeys(vararg keys: String) = apply { redactKeys += keys }
         fun redactHeaders(vararg headers: String) = apply { redactHeaders += headers }
