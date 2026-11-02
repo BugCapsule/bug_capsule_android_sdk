@@ -42,6 +42,7 @@ import dev.bugcapsule.android.core.RecordedWindow
 import dev.bugcapsule.android.core.Redactor
 import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
+import dev.bugcapsule.android.core.RetainedBytes
 import dev.bugcapsule.android.core.RuntimeInfo
 import dev.bugcapsule.android.core.SessionInfo
 import dev.bugcapsule.android.emergency.EMERGENCY_DECISIONS_CAPABILITY
@@ -83,6 +84,8 @@ class BugCapsuleTestOverrides @JvmOverloads constructor(
     val random: Random? = null,
     /** Start the ANR watchdog and native crash handler (off in tests by default). */
     val monitoringThreads: Boolean = false,
+    /** Runs on the executor before capture is prepared (tests hold preparation back with it). */
+    val beforePrepare: Runnable? = null,
 )
 
 internal const val SDK_NAME = "bugcapsule-android"
@@ -103,6 +106,7 @@ internal class Runtime(
     private val connection: ResolvedConnection = ResolvedConnection.NONE,
 ) : BugCapsuleSession {
     private val samplingRandom: Random = overrides?.random ?: Random()
+    private val initUptimeMs = android.os.SystemClock.uptimeMillis()
     private val startElapsed = host.elapsedRealtime()
     private val sessionId = Ids.uuidV4()
     private val startedAtMs = System.currentTimeMillis()
@@ -140,6 +144,17 @@ internal class Runtime(
 
     @Volatile
     private var killed = false
+
+    /** The app's consent choice in this process ([setCollectionEnabled]); null: the persisted one, else the config default. */
+    @Volatile
+    private var collectionChoice: Boolean? = null
+
+    /** Collection is off (consent, BC-ENT-038): nothing is captured or uploaded in this process. */
+    @Volatile
+    private var collectionOff = false
+
+    /** The kill switch or the app's consent stopped capture. */
+    private val halted: Boolean get() = killed || collectionOff
 
     @Volatile
     private var anchorMs: Long? = null
@@ -197,16 +212,48 @@ internal class Runtime(
     private val restoredStates = Collections.synchronizedSet(HashSet<String>())
     private val warned = Collections.synchronizedSet(HashSet<String>())
 
+    @Volatile
+    private var executorThread: Thread? = null
+
     val executor: ScheduledThreadPoolExecutor = ScheduledThreadPoolExecutor(1, ThreadFactory { r ->
-        Thread(r, "BugCapsule").apply { isDaemon = true }
+        Thread(r, "BugCapsule").apply { isDaemon = true }.also { executorThread = it }
     }).apply { removeOnCancelPolicy = true }
+
+    /**
+     * True while [prepareCapture] runs on the executor (BC-ENT-036): events
+     * recorded meanwhile wait in [early] and are recorded once it is done.
+     */
+    @Volatile
+    private var preparing = false
+
+    /** Startup events, oldest first (at most [EARLY_EVENTS]); guarded by [lock]. */
+    private val early = ArrayDeque<EarlyEvent>()
+    private var earlyDropped = 0
+
+    /** Monitoring calls made while preparing (scope changes, captured errors), in order; guarded by [lock]. */
+    private val earlyMonitoring = ArrayList<(Monitoring) -> Unit>()
+    private val prepared = java.util.concurrent.CountDownLatch(1)
+
+    /** The session may still record once prepared: enabled, and not sampled out by the local rate. */
+    @Volatile
+    private var mayRecord = false
+    private var samplingRoll = 0.0
+
+    /** Activity callbacks for the screen tracer, registered before preparation and attached after it. */
+    private var tracerCallbacks: DeferredActivityCallbacks? = null
+
+    private class EarlyEvent(val t: Long, val type: String, val data: Map<String, Any?>)
 
     // ------------------------------------------------------------- session
 
     override val mode: CaptureMode
         get() = config.mode ?: if (host.isDebuggable) CaptureMode.DEBUG else CaptureMode.PRODUCTION
-    override val isRecording: Boolean get() = recording
-    override val isObserving: Boolean get() = recording || monitoring?.active == true
+    /** Also true while preparing when this session may record: integrations capture what happens during startup. */
+    override val isRecording: Boolean get() = recording || (preparing && mayRecord && !collectionOff)
+    override val isObserving: Boolean get() = isRecording || (preparing && !collectionOff) || monitoring?.active == true
+
+    /** Recording has started (after preparation): what [dev.bugcapsule.android.BugCapsule.isRecording] reports. */
+    val recordingStarted: Boolean get() = recording
     override val isReplaying: Boolean get() = engine != null
     override val redactor: Redactor get() = currentRedactor
     override val captureNetworkBodies: Boolean get() = captureBodies
@@ -222,7 +269,7 @@ internal class Runtime(
         sink = { type, data -> record(type, data) },
         now = { now() },
         redactor = { currentRedactor },
-        recording = { recording && !killed },
+        recording = { isRecording && !halted },
         payloadsEnabled = { captureBodies },
         disabledAdapters = { remote?.current?.disabledAdapters ?: emptyList() },
     )
@@ -268,6 +315,7 @@ internal class Runtime(
      * record once, capsules and events both see it.
      */
     override fun record(type: String, data: Map<String, Any?>) {
+        if (preparing && keepEarly(type, data)) return
         val mon = monitoring?.takeIf { it.active }
         if (!recording && mon == null) return
         try {
@@ -282,10 +330,40 @@ internal class Runtime(
         }
     }
 
-    private fun append(type: String, clean: Map<String, Any?>) {
+    /**
+     * Runs [op] with monitoring: now, or once capture is prepared when it is
+     * still being prepared (at most [EARLY_EVENTS] calls are kept). Nothing
+     * runs when monitoring is off.
+     */
+    fun withMonitoring(op: (Monitoring) -> Unit) {
+        if (preparing) {
+            synchronized(lock) {
+                if (preparing) {
+                    if (earlyMonitoring.size < EARLY_EVENTS && !collectionOff) earlyMonitoring.add(op)
+                    return
+                }
+            }
+        }
+        val mon = monitoring ?: return
+        op(mon)
+    }
+
+    /** Keeps an event recorded during preparation; false once preparation finished. */
+    private fun keepEarly(type: String, data: Map<String, Any?>): Boolean = synchronized(lock) {
+        if (!preparing) return false
+        if (collectionOff) return true
+        if (early.size >= EARLY_EVENTS) {
+            early.removeFirst()
+            earlyDropped++
+        }
+        early.addLast(EarlyEvent(now(), type, LinkedHashMap(data)))
+        true
+    }
+
+    private fun append(type: String, clean: Map<String, Any?>, t: Long = now()) {
         synchronized(lock) {
             val r = recorder
-            val event = r?.add(now(), type, clean)
+            val event = r?.add(t, type, clean)
             if (event != null) journal?.event(event, r.windowStartSeq)
         }
     }
@@ -330,7 +408,7 @@ internal class Runtime(
     private fun sanitizeEvent(type: String, data: Map<String, Any?>, hook: Boolean = true): Map<String, Any?>? {
         return try {
             var out: Map<String, Any?> = data
-            if (type == EventTypes.HTTP && !captureBodies) out = withoutBodies(out)
+            if (type == EventTypes.HTTP && !captureBodies) out = RetainedBytes.withoutHttpBodies(out)
             if (type != EventTypes.POINTER && type != EventTypes.LIFECYCLE && type != EventTypes.KEY) {
                 @Suppress("UNCHECKED_CAST")
                 val redacted = (currentRedactor.redactJson(out) as Map<String, Any?>).toMutableMap()
@@ -365,29 +443,140 @@ internal class Runtime(
         if (BugCapsuleReplay.isPostMortem() && host.isDebuggable) {
             // Judging how a replayed attempt died: this process must not capture, report or upload.
             SdkLog.i("replay post-mortem: capture is off in this process")
+            prepared.countDown()
             return
         }
         val armed = BugCapsuleReplay.armed()
         if (armed != null) {
             if (host.isDebuggable) {
-                startReplay(armed)
+                try {
+                    startReplay(armed)
+                } finally {
+                    prepared.countDown()
+                }
                 return
             }
             SdkLog.w("ignoring replay: the app is not debuggable")
         }
         try {
-            prepareCapture()
+            beginCapture()
         } catch (e: Throwable) {
             SdkLog.w("capture setup failed; the app runs without capture: $e")
+            synchronized(lock) {
+                preparing = false
+                early.clear()
+                earlyMonitoring.clear()
+            }
             stopRecording()
+            prepared.countDown()
         }
-        if (remote != null) {
-            schedule(0) {
+    }
+
+    /**
+     * The calling thread (usually main, in `Application.onCreate`) does no
+     * disk work (BC-ENT-036): it sets integrations up and registers the
+     * lifecycle and crash callbacks, so nothing that happens next is missed.
+     * The cached remote config, crash journals, the launch snapshot and the
+     * monitoring files are read on the executor ([prepareCapture]); events
+     * recorded meanwhile wait in memory, and capture and uploads start only
+     * once it is done. A failure there leaves the app without capture.
+     */
+    private fun beginCapture() {
+        currentRedactor = baseRedactor()
+        if (!config.enabled) {
+            prepared.countDown()
+            return
+        }
+        val launchT = now()
+        val launchWall = System.currentTimeMillis()
+        // Rolled now, judged against the cached rate once it is read: a session over the local cap never records.
+        samplingRoll = samplingRandom.nextDouble()
+        mayRecord = mode != CaptureMode.PRODUCTION || samplingRoll < config.productionSampleRate.coerceIn(0.0, 1.0)
+        // The app's setting until the cached config is read; startup events lose what it turns off before they are recorded.
+        captureBodies = appCapturesBodies
+        preparing = true
+        for (integration in integrations) {
+            try {
+                integration.setUp(this)
+            } catch (e: Throwable) {
+                SdkLog.w("${integration.name} setup failed: $e")
+            }
+        }
+        capture = AndroidCapture(this, host).also { it.install() }
+        if (config.monitoring && (config.enableActivityTracing || config.enableAppStartTracking)) {
+            tracerCallbacks = DeferredActivityCallbacks().also { host.application.registerActivityLifecycleCallbacks(it) }
+        }
+        installErrorHandler()
+        executor.execute(guarded {
+            try {
+                overrides?.beforePrepare?.run()
+                prepareCapture(launchT, launchWall)
+            } catch (e: Throwable) {
+                SdkLog.w("capture setup failed; the app runs without capture: $e")
+                stopRecording()
+            } finally {
+                finishPreparing()
+            }
+            if (remote != null) {
                 remote?.refresh()
                 flushOutbox(null)
                 monitoring?.flushNow()
             }
+        })
+    }
+
+    /** Records the events kept during preparation, then lets new ones through. */
+    private fun finishPreparing() {
+        synchronized(lock) {
+            preparing = false
+            val ready = monitoring
+            for (op in earlyMonitoring) {
+                try {
+                    if (ready != null) op(ready)
+                } catch (t: Throwable) {
+                    warnOnce("monitoring call made during startup failed: $t")
+                }
+            }
+            earlyMonitoring.clear()
+            while (early.isNotEmpty()) {
+                val e = early.removeFirst()
+                try {
+                    val mon = monitoring?.takeIf { it.active }
+                    if (!recording && mon == null) continue
+                    val data = if (!captureBodies && InteractionTypes.isInteraction(e.type)) RetainedBytes.withoutPayloads(e.data) else e.data
+                    val clean = sanitizeEvent(e.type, data) ?: continue
+                    if (recording) append(e.type, clean, e.t)
+                    mon?.onRecorded(e.type, clean)
+                } catch (t: Throwable) {
+                    warnOnce("dropping a ${e.type} event: $t")
+                }
+            }
         }
+        if (earlyDropped > 0 && recording) SdkLog.w("$earlyDropped events recorded during startup were dropped (more than $EARLY_EVENTS)")
+        val tracer = screenTracer
+        val callbacks = tracerCallbacks
+        val mon = monitoring
+        if (callbacks != null || mon != null) {
+            host.postToMain {
+                callbacks?.attach(tracer)
+                // The app came to the foreground while monitoring was being prepared.
+                if (mon != null && foreground && !disposed) {
+                    if (mon.active && mon.sessionTrackingAllowed) mon.sessions?.onForeground()
+                    shakeDetector?.let {
+                        it.stop()
+                        it.start(host.context)
+                    }
+                }
+            }
+        }
+        prepared.countDown()
+    }
+
+    /** Waits until capture is prepared (or failed); false on timeout. */
+    fun awaitPrepared(timeoutMs: Long): Boolean = try {
+        prepared.await(timeoutMs, TimeUnit.MILLISECONDS)
+    } catch (_: InterruptedException) {
+        false
     }
 
     private fun scope(): String {
@@ -406,11 +595,17 @@ internal class Runtime(
         config.redactPatterns,
     )
 
-    private fun prepareCapture() {
-        currentRedactor = baseRedactor()
-        if (!config.enabled) return
-        val s = CapsuleStore(overrides?.storageDir ?: host.storageRoot, config.maxSavedCaptures)
+    private fun prepareCapture(launchT: Long, launchWall: Long) {
+        val s = CapsuleStore(overrides?.storageDir ?: host.storageRoot, config.maxSavedCaptures, config.savedCaptureMaxAgeMs)
         store = s
+        val choice = collectionChoice
+        if (choice != null) writeCollectionChoice(s.root, choice)
+        if (!(choice ?: readCollectionChoice(s.root) ?: config.collectionEnabled)) {
+            // No consent: nothing is captured, fetched or uploaded, and what an earlier session queued goes.
+            collectionOff = true
+            clearLocalDataNow()
+            return
+        }
         val t = (overrides?.transport ?: config.backend?.let { BackendClient(it) })?.let { observed(it) }
         if (t != null) {
             transport = t
@@ -443,13 +638,6 @@ internal class Runtime(
         // Before the previous processes' crashes are reported: a journal left with this pid is theirs.
         val journalDir = if (record) CrashCapsules.prepare(File(s.root, CrashCapsules.DIR), android.os.Process.myPid()) else null
 
-        for (integration in integrations) {
-            try {
-                integration.setUp(this)
-            } catch (e: Throwable) {
-                SdkLog.w("${integration.name} setup failed: $e")
-            }
-        }
         try {
             startMonitoring(s, t, cached)
         } catch (e: Throwable) {
@@ -463,18 +651,16 @@ internal class Runtime(
                 CrashCapsules.cleanup(File(s.root, CrashCapsules.DIR), { pid -> CrashCapsules.isAlive(pid, host.context.packageName) })
             }
         }
-        capture = AndroidCapture(this, host).also { it.install() }
-        if (monitoring != null) installErrorHandler()
         if (record) {
             val launch = Checkpoint(
                 kind = CheckpointKind.LAUNCH,
-                t = now(),
-                wallClockMs = System.currentTimeMillis(),
+                t = launchT,
+                wallClockMs = launchWall,
                 afterSeq = 0,
                 data = snapshot(CheckpointKind.LAUNCH),
             )
             synchronized(lock) {
-                recorder = FlightRecorder(launch, config.maxEvents, config.windowMs)
+                recorder = FlightRecorder(launch, config.maxEvents, config.windowMs, maxRetainedBytes = config.maxRetainedBytes)
                 if (journalDir != null) {
                     journal = CrashJournal(journalDir, { journalLimit(maxCapsuleBytes) }).also { it.checkpoint(launch, 0) }
                 }
@@ -482,7 +668,6 @@ internal class Runtime(
             recording = true
             BugCapsule.emergency.writeTrackedDecisions() // Those made before recording started.
             if (journal != null) schedule(0) { refreshJournalHeader() }
-            installErrorHandler()
             schedulePeriodicCheckpoint()
         }
     }
@@ -594,9 +779,8 @@ internal class Runtime(
             ).also { it.start() }
         }
         if (config.enableActivityTracing || config.enableAppStartTracking) {
-            screenTracer = ScreenTracer(mon, config, android.os.SystemClock.uptimeMillis()).also {
-                host.application.registerActivityLifecycleCallbacks(it)
-            }
+            // Attached to the callbacks registered by beginCapture once preparation finished.
+            screenTracer = ScreenTracer(mon, config, initUptimeMs)
         }
         if (config.enableShakeToReport) {
             shakeDetector = ShakeDetector(Runnable {
@@ -676,7 +860,7 @@ internal class Runtime(
         if (remote != null && !remote.enabled) return false
         if (mode != CaptureMode.PRODUCTION) return true
         sessionRate = effectiveRate(remote)
-        return samplingRandom.nextDouble() < sessionRate
+        return samplingRoll < sessionRate
     }
 
     private fun installErrorHandler() {
@@ -689,6 +873,8 @@ internal class Runtime(
 
     /** Called by [CrashHandler] on the crashing thread, before the previous handler. */
     fun onUncaught(uncaught: Throwable) {
+        // A crash during startup: its capsule needs the prepared recorder.
+        if (preparing && Thread.currentThread() !== executorThread) awaitPrepared(CRASH_PREPARE_WAIT_MS)
         val error = unwrapFramework(uncaught)
         val replaying = engine
         if (replaying != null) {
@@ -741,6 +927,11 @@ internal class Runtime(
             replaying.onFailure(failure)
             return
         }
+        if (preparing && !fatal) {
+            // Runs on the executor after preparation: capture never starts before it.
+            schedule(0) { handleFailure(failure, false, error) }
+            return
+        }
         val mon = monitoring?.takeIf { it.active }
         if (!recording) {
             if (mon != null) failureEvent(mon, failure, error, fatal, null)
@@ -788,16 +979,15 @@ internal class Runtime(
     fun onLifecycle(state: String) {
         record(EventTypes.LIFECYCLE, mapOf("state" to state))
         if (state == "paused") journal?.flush()
+        if (state == "resumed") foreground = true else if (state == "paused") foreground = false
         val mon = monitoring
-        if (mon != null) {
+        if (mon != null && !collectionOff) {
             when (state) {
                 "resumed" -> {
-                    foreground = true
                     if (mon.active && mon.sessionTrackingAllowed) mon.sessions?.onForeground()
                     shakeDetector?.start(host.context)
                 }
                 "paused" -> {
-                    foreground = false
                     mon.sessions?.onBackground()
                     shakeDetector?.stop()
                     schedule(0) { mon.flushNow() }
@@ -805,6 +995,7 @@ internal class Runtime(
             }
         }
         val controller = remote ?: return
+        if (collectionOff) return
         when (state) {
             "resumed" -> schedule(0) {
                 controller.onResumed()
@@ -920,7 +1111,7 @@ internal class Runtime(
     }
 
     fun reportState(key: String) {
-        if (!recording) return
+        if (!isRecording) return
         val entry = states[key]
         val value = try {
             entry?.first?.serialize()
@@ -971,6 +1162,13 @@ internal class Runtime(
         if (window.hasGap) {
             eligibility.missing("events.window", "events between the checkpoint and the window were evicted; raise window or maxEvents")
         }
+        if (window.truncatedBodies > 0 || window.budgetEvicted > 0) {
+            eligibility.missing(
+                "capture.truncated",
+                "over the ${config.maxRetainedBytes}-byte retained budget: ${window.truncatedBodies} event bodies and " +
+                    "${window.budgetEvicted} events were dropped; raise maxRetainedBytes",
+            )
+        }
         val patch = patchIdentity
         val dependencies = try {
             interactionRecorder.dependencies(window.events)
@@ -1004,7 +1202,7 @@ internal class Runtime(
         // Never queue what a reader would reject; keep it locally for inspection.
         val problem = CapsuleValidator.validate(CapsuleCodec.toJson(capsule))
         val bytes = CapsuleCodec.encode(capsule)
-        if (killed) return null
+        if (halted) return null
         val s = store ?: return null
         val file = try {
             s.save(capsule.manifest.capsuleId, bytes)
@@ -1012,7 +1210,7 @@ internal class Runtime(
             SdkLog.w("could not save capsule (${e.message}); dropped")
             return null
         }
-        if (killed) {
+        if (halted) {
             s.clearSavedCaptures()
             return null
         }
@@ -1027,7 +1225,7 @@ internal class Runtime(
                     UploadResult(UploadStatus.REJECTED, message = "capsule is ${bytes.size} bytes, limit $maxCapsuleBytes")
                 !box.enqueue(capsule.manifest.capsuleId, bytes) ->
                     UploadResult(UploadStatus.REJECTED, message = "not queued (outbox limit or disk error)")
-                killed -> {
+                halted -> {
                     box.purge()
                     return null
                 }
@@ -1201,7 +1399,7 @@ internal class Runtime(
      */
     private fun crashCapsule(c: PreviousProcess.Crash, s: CapsuleStore, mon: Monitoring): LinkedCrash? {
         val pid = c.pid ?: return null
-        if (killed || remote?.current?.enabled == false) return null
+        if (halted || remote?.current?.enabled == false) return null
         val dir = CrashCapsules.find(File(s.root, CrashCapsules.DIR), pid) ?: return null
         return try {
             val journal = CrashCapsules.read(dir) ?: return null
@@ -1253,7 +1451,7 @@ internal class Runtime(
 
     private fun cut(s: String, max: Int) = if (s.length <= max) s else s.substring(0, max)
 
-    private val uploadsAllowed: Boolean get() = !disposed && (remote?.uploadsAllowed ?: false)
+    private val uploadsAllowed: Boolean get() = !disposed && !collectionOff && (remote?.uploadsAllowed ?: false)
 
     /**
      * Uploads pending capsules (call on the executor). The remote config is
@@ -1325,8 +1523,8 @@ internal class Runtime(
                 recorder?.rewrite(
                     event = { e ->
                         when {
-                            e.type == EventTypes.HTTP -> e.copy(data = withoutBodies(e.data))
-                            InteractionTypes.isInteraction(e.type) -> e.copy(data = withoutPayloads(e.data))
+                            e.type == EventTypes.HTTP -> e.copy(data = RetainedBytes.withoutHttpBodies(e.data))
+                            InteractionTypes.isInteraction(e.type) -> e.copy(data = RetainedBytes.withoutPayloads(e.data))
                             else -> e
                         }
                     },
@@ -1369,18 +1567,6 @@ internal class Runtime(
         if (rewritten) resetJournal()
     }
 
-    /** Payload objects of an interaction event once payload capture is off: `omitted`, size and kind kept. */
-    private fun withoutPayloads(data: Map<String, Any?>): Map<String, Any?> {
-        val d = LinkedHashMap(data)
-        for (field in InteractionTypes.PAYLOAD_FIELDS) {
-            val p = J.obj(d[field]) ?: continue
-            d[field] = linkedMapOf<String, Any?>("mode" to "omitted", "replayable" to false).also { out ->
-                p["kind"]?.let { out["kind"] = it }
-            }
-        }
-        return d
-    }
-
     /** Interaction events cannot be partially kept: their dependency gets an `events.dropped` gap. */
     private fun droppedInteraction(e: CapsuleEvent) {
         val dep = e.data["dep"] as? String ?: return
@@ -1415,15 +1601,6 @@ internal class Runtime(
         return true
     }
 
-    private fun withoutBodies(data: Map<String, Any?>): Map<String, Any?> {
-        val d = LinkedHashMap(data)
-        d["requestBody"] = null
-        d["responseBody"] = null
-        d["bodyEncoding"] = "omitted"
-        if (d["requestEncoding"] != null && d["requestEncoding"] != "json") d["requestEncoding"] = "omitted"
-        return d
-    }
-
     private fun stopRecording() {
         recording = false
         val stopped = synchronized(lock) {
@@ -1448,6 +1625,96 @@ internal class Runtime(
         try {
             store?.clearSavedCaptures()
         } catch (_: Throwable) {
+        }
+    }
+
+    // ------------------------------------------------- local data and consent
+
+    /**
+     * Consent (BC-ENT-038). False stops capture and monitoring now, and on
+     * the executor deletes what was collected ([clearLocalDataNow]). True
+     * takes effect at the next launch when collection was off in this
+     * process. The choice is persisted in the SDK's storage.
+     */
+    fun setCollectionEnabled(enabled: Boolean) {
+        collectionChoice = enabled
+        if (!enabled) {
+            // In memory only on the calling thread; files are closed and deleted on the executor.
+            collectionOff = true
+            recording = false
+            synchronized(lock) {
+                early.clear()
+                earlyMonitoring.clear()
+            }
+            monitoring?.disable(purge = false)
+        } else if (collectionOff) {
+            SdkLog.i("collection turned on: capture and monitoring start at the next launch")
+        }
+        schedule(0) {
+            val root = store?.root ?: return@schedule // not prepared yet: preparation applies the choice
+            writeCollectionChoice(root, enabled)
+            if (!enabled) {
+                stopRecording()
+                monitoring?.disable(purge = false)
+                clearLocalDataNow()
+            }
+        }
+    }
+
+    /**
+     * Deletes what the SDK stored on the device (call on the executor):
+     * queued and saved capsules, queued monitoring envelopes, crash journals
+     * of other processes and native crash records, the cached remote config
+     * and the monitoring scope, session and install id. Kept: the emergency
+     * policy cache (guards must keep working offline), the consent choice,
+     * the record of already reported exits, and this process's live crash
+     * journal, which mirrors the recording in memory.
+     */
+    fun clearLocalDataNow() {
+        val s = store ?: return
+        val root = s.root
+        fun quietly(block: () -> Unit) {
+            try {
+                block()
+            } catch (e: Throwable) {
+                warnOnce("could not clear local data: $e")
+            }
+        }
+        quietly { (outbox ?: UploadOutbox(s.outboxDir, config.outboxLimits)).purge() }
+        quietly { s.clearSavedCaptures() }
+        val monitoringDir = File(root, "monitoring")
+        quietly {
+            val mon = monitoring
+            if (mon != null) {
+                mon.purgeQueued()
+            } else {
+                UploadOutbox(File(monitoringDir, "envelopes"), config.envelopeOutboxLimits, extension = "envelope").purge()
+            }
+        }
+        val live = journal?.dir
+        quietly { File(root, CrashCapsules.DIR).listFiles()?.forEach { if (it != live) it.deleteRecursively() } }
+        quietly { File(root, "native").listFiles { f -> f.isFile && f.name.endsWith(".crash") }?.forEach { Files.deleteQuietly(it) } }
+        quietly { Files.deleteQuietly(s.configFile) }
+        for (name in listOf("scope.json", "session.json", "install_id")) quietly { Files.deleteQuietly(File(monitoringDir, name)) }
+    }
+
+    private fun collectionFile(root: File) = File(root, COLLECTION_FILE)
+
+    private fun readCollectionChoice(root: File): Boolean? = try {
+        when (collectionFile(root).takeIf { it.exists() }?.readText()?.trim()) {
+            "on" -> true
+            "off" -> false
+            else -> null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun writeCollectionChoice(root: File, enabled: Boolean) {
+        try {
+            Files.writeAtomically(collectionFile(root), (if (enabled) "on" else "off").toByteArray())
+        } catch (e: Exception) {
+            warnOnce("could not persist the collection choice: $e")
         }
     }
 
@@ -1638,7 +1905,7 @@ internal class Runtime(
         val state = when {
             tokenError != null -> ConnectionState.valueOf(tokenError.name)
             config.backend == null && overrides?.transport == null -> ConnectionState.NOT_CONFIGURED
-            !config.enabled || engine != null -> ConnectionState.DISABLED
+            !config.enabled || engine != null || collectionOff -> ConnectionState.DISABLED
             controller?.keyRejected == true -> ConnectionState.REJECTED
             controller?.current?.enabled == false -> ConnectionState.DISABLED
             controller?.fetchedThisSession != null -> ConnectionState.CONNECTED
@@ -1657,6 +1924,7 @@ internal class Runtime(
             state == ConnectionState.NOT_CONFIGURED -> "no token or backend configured; capsules stay on the device"
             state == ConnectionState.DISABLED && engine != null -> "replaying: the SDK does not talk to the backend"
             state == ConnectionState.DISABLED && !config.enabled -> "disabled by the app (enabled = false)"
+            state == ConnectionState.DISABLED && collectionOff -> "collection is off (BugCapsule.setCollectionEnabled(false))"
             state == ConnectionState.DISABLED -> "capture is turned off for this project (remote config)"
             else -> null
         }
@@ -1706,7 +1974,7 @@ internal class Runtime(
         disposed = true
         anrWatchdog?.shutdown()
         shakeDetector?.stop()
-        screenTracer?.let { host.application.unregisterActivityLifecycleCallbacks(it) }
+        tracerCallbacks?.let { host.application.unregisterActivityLifecycleCallbacks(it) }
         monitoring?.disable(purge = false)
         stopRecording()
         remote?.dispose()
@@ -1721,6 +1989,15 @@ internal class Runtime(
 
     companion object {
         const val STATE_KEY = "state"
+
+        /** The persisted consent choice (`on` / `off`) under the SDK's storage. */
+        const val COLLECTION_FILE = "collection"
+
+        /** Events kept in memory while capture is prepared (BC-ENT-036). */
+        const val EARLY_EVENTS = 256
+
+        /** How long a crash during startup waits for preparation before it is handled without it. */
+        private const val CRASH_PREPARE_WAIT_MS = 2_000L
 
         /** capsule-v2 §6: `checkpoint.data.interactions` (open connections and subscriptions). */
         const val INTERACTIONS_KEY = "interactions"

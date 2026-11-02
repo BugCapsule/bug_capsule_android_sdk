@@ -69,6 +69,13 @@ class BugCapsuleConfig private constructor(b: Builder) {
     /** Local master switch; the backend kill switch can also disable capture. */
     val enabled: Boolean = b.enabled
 
+    /**
+     * Whether data is collected before the app called
+     * [BugCapsule.setCollectionEnabled] (consent). Once the app called it,
+     * the persisted choice wins over this default.
+     */
+    val collectionEnabled: Boolean = b.collectionEnabled
+
     /** Explicit backend URL + ingest key. Wins over [token]. */
     val backend: BugCapsuleBackendConfig? = b.backend
 
@@ -89,6 +96,13 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val checkpointIntervalMs: Long = b.checkpointIntervalMs
     val windowMs: Long = b.windowMs
     val maxEvents: Int = b.maxEvents
+
+    /**
+     * Estimated bytes of recorded events kept in memory (default 8 MiB). Over
+     * it the oldest HTTP bodies and interaction payloads are dropped first,
+     * then the oldest events; capsules then list `capture.truncated`.
+     */
+    val maxRetainedBytes: Long = b.maxRetainedBytes
 
     /** Maximum fraction of production sessions that record (remote `sampleRate` can lower it, never raise it). */
     val productionSampleRate: Double = b.productionSampleRate
@@ -111,6 +125,9 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val ignoreError: ErrorFilter? = b.ignoreError
     val labels: Map<String, String> = b.labels.toMap()
     val maxSavedCaptures: Int = b.maxSavedCaptures
+
+    /** Saved capsules older than this are deleted (default 7 days). */
+    val savedCaptureMaxAgeMs: Long = b.savedCaptureMaxAgeMs
 
     // ------------------------------------------------- monitoring (monitoring-v1 §11)
 
@@ -202,6 +219,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var flavor: String? = null
         internal var mode: CaptureMode? = null
         internal var enabled = true
+        internal var collectionEnabled = true
         internal var backend: BugCapsuleBackendConfig? = null
         internal var token: String? = null
         internal var gitSha: String? = null
@@ -211,6 +229,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var checkpointIntervalMs = 30_000L
         internal var windowMs = 5 * 60_000L
         internal var maxEvents = 20_000
+        internal var maxRetainedBytes = dev.bugcapsule.android.core.DEFAULT_MAX_RETAINED_BYTES
         internal var productionSampleRate = 0.1
         internal var autoCaptureOnFailure = true
         internal var maxCapsulesPerSession = 3
@@ -226,6 +245,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var ignoreError: ErrorFilter? = null
         internal val labels = LinkedHashMap<String, String>()
         internal var maxSavedCaptures = 20
+        internal var savedCaptureMaxAgeMs = dev.bugcapsule.android.internal.CapsuleStore.SAVED_CAPTURE_MAX_AGE_MS
         internal var monitoring = true
         internal var release: String? = null
         internal var environment: String? = null
@@ -261,16 +281,17 @@ class BugCapsuleConfig private constructor(b: Builder) {
 
         internal constructor(c: BugCapsuleConfig) : this() {
             appVersion = c.appVersion; appBuild = c.appBuild; appId = c.appId; appName = c.appName
-            flavor = c.flavor; mode = c.mode; enabled = c.enabled; backend = c.backend; token = c.token; gitSha = c.gitSha
+            flavor = c.flavor; mode = c.mode; enabled = c.enabled; collectionEnabled = c.collectionEnabled; backend = c.backend; token = c.token; gitSha = c.gitSha
             gitDirty = c.gitDirty; stateSchemaVersion = c.stateSchemaVersion
             patchBinding = c.patchBinding
             checkpointIntervalMs = c.checkpointIntervalMs; windowMs = c.windowMs; maxEvents = c.maxEvents
+            maxRetainedBytes = c.maxRetainedBytes
             productionSampleRate = c.productionSampleRate; autoCaptureOnFailure = c.autoCaptureOnFailure
             maxCapsulesPerSession = c.maxCapsulesPerSession; captureNetworkBodies = c.captureNetworkBodies
             maxBodyBytes = c.maxBodyBytes; redactKeys += c.redactKeys; redactHeaders += c.redactHeaders
             redactPatterns += c.redactPatterns; beforeRecord = c.beforeRecord; beforeCheckpoint = c.beforeCheckpoint
             outboxLimits = c.outboxLimits; maxStaleConfigMs = c.maxStaleConfigMs; ignoreError = c.ignoreError
-            labels += c.labels; maxSavedCaptures = c.maxSavedCaptures
+            labels += c.labels; maxSavedCaptures = c.maxSavedCaptures; savedCaptureMaxAgeMs = c.savedCaptureMaxAgeMs
             monitoring = c.monitoring; release = c.release; environment = c.environment; dist = c.dist
             errorSampleRate = c.errorSampleRate; tracesSampleRate = c.tracesSampleRate; tracesSampler = c.tracesSampler
             tracePropagationTargets += c.tracePropagationTargets; enableAutoSessionTracking = c.enableAutoSessionTracking
@@ -293,6 +314,9 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun flavor(v: String?) = apply { flavor = v }
         fun mode(v: CaptureMode?) = apply { mode = v }
         fun enabled(v: Boolean) = apply { enabled = v }
+
+        /** Default consent; see [BugCapsuleConfig.collectionEnabled]. */
+        fun collectionEnabled(v: Boolean) = apply { collectionEnabled = v }
         fun backend(v: BugCapsuleBackendConfig?) = apply { backend = v }
         fun backend(url: String, ingestKey: String) = apply { backend = BugCapsuleBackendConfig(url, ingestKey) }
 
@@ -306,6 +330,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun checkpointIntervalMs(v: Long) = apply { checkpointIntervalMs = v.coerceAtLeast(1000) }
         fun windowMs(v: Long) = apply { windowMs = v }
         fun maxEvents(v: Int) = apply { maxEvents = v }
+        fun maxRetainedBytes(v: Long) = apply { maxRetainedBytes = v.coerceAtLeast(64L * 1024) }
         fun productionSampleRate(v: Double) = apply { productionSampleRate = v }
         fun autoCaptureOnFailure(v: Boolean) = apply { autoCaptureOnFailure = v }
         fun maxCapsulesPerSession(v: Int) = apply { maxCapsulesPerSession = v }
@@ -323,6 +348,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun ignoreError(v: ErrorFilter?) = apply { ignoreError = v }
         fun label(key: String, value: String) = apply { labels[key] = value }
         fun maxSavedCaptures(v: Int) = apply { maxSavedCaptures = v }
+        fun savedCaptureMaxAgeMs(v: Long) = apply { savedCaptureMaxAgeMs = v.coerceAtLeast(0) }
         fun monitoring(v: Boolean) = apply { monitoring = v }
         fun release(v: String?) = apply { release = v?.takeIf { it.isNotBlank() } }
         fun environment(v: String?) = apply { environment = v?.takeIf { it.isNotBlank() } }

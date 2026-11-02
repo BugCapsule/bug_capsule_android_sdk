@@ -115,6 +115,7 @@ class TokenSetupTest {
     fun theTokenAloneConnectsAndBothConfirmationsAreSeparate() {
         val started = System.nanoTime()
         BugCapsule.init(app, token("$api/"))
+        awaitPrepared()
         assertTrue("init does not wait for the network", (System.nanoTime() - started) / 1_000_000 < 2_000)
         until(what = "connected") { state() == ConnectionState.CONNECTED }
 
@@ -139,6 +140,7 @@ class TokenSetupTest {
     @Test
     fun capsulesAndEventsGoToTheTokensApiAndAreConfirmed() {
         BugCapsule.init(app, qa(token()), listOf(BugCapsuleSharedPreferences.builder().allowFile("prefs").build()))
+        awaitPrepared()
         BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
         assertEquals(ConnectionState.CONNECTED, state())
         BugCapsule.reportError(IllegalStateException("price is null"))
@@ -163,6 +165,7 @@ class TokenSetupTest {
             BugCapsuleConfig.builder().mode(CaptureMode.QA).backend("$api/bc/", legacy)
                 .token(token("https://elsewhere.invalid")).build(),
         )
+        awaitPrepared()
         until(what = "connected") { state() == ConnectionState.CONNECTED }
         assertEquals("/bc/v1/sdk/config", seen.first().path)
         assertEquals("Bearer $legacy", seen.first().getHeader("Authorization"))
@@ -182,6 +185,7 @@ class TokenSetupTest {
             ShadowLog.clear()
             BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.newFolder())
             BugCapsule.init(app, BugCapsuleConfig.builder().mode(CaptureMode.QA).backend(url, ingestKey).build())
+            awaitPrepared()
             val s = BugCapsule.status().connection
             assertEquals(url, ConnectionState.NOT_CONFIGURED, s.state)
             assertNull(s.apiUrl)
@@ -199,6 +203,7 @@ class TokenSetupTest {
     @Test
     fun withoutTokenOrBackendTheStatusIsNotConfigured() {
         BugCapsule.init(app, BugCapsuleConfig.builder().mode(CaptureMode.QA).build())
+        awaitPrepared()
         val s = BugCapsule.status()
         assertEquals(ConnectionState.NOT_CONFIGURED, s.connection.state)
         assertNull(s.connection.source)
@@ -219,6 +224,7 @@ class TokenSetupTest {
             ShadowLog.clear()
             BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.newFolder())
             BugCapsule.init(app, qa(token))
+            awaitPrepared()
             val s = BugCapsule.status().connection
             assertEquals(token, expected, s.state)
             assertEquals(expected.code, s.reason)
@@ -236,6 +242,7 @@ class TokenSetupTest {
         }
         // The one-line convenience overload behaves the same.
         BugCapsule.init(app, "bcs_" + "s".repeat(43))
+        awaitPrepared()
         assertEquals(ConnectionState.INVALID_TOKEN, state())
         assertTrue(BugCapsule.status().connection.message!!.contains("secret key"))
         assertEquals(0, seen.size)
@@ -253,6 +260,7 @@ class TokenSetupTest {
             }
         }
         BugCapsule.init(app, qa(token()))
+        awaitPrepared()
         assertTrue(BugCapsule.isRecording)
         until(what = "rejected") { state() == ConnectionState.REJECTED }
         val s = BugCapsule.status().connection
@@ -274,6 +282,7 @@ class TokenSetupTest {
     fun aLegacyKeyRefusalIsRejectedToo() {
         answer = { MockResponse().setResponseCode(401).setBody("""{"code":"unauthorized","reason":"key_unknown_or_revoked"}""") }
         BugCapsule.init(app, BugCapsuleConfig.builder().mode(CaptureMode.QA).backend(api, "bci_" + "k".repeat(43)).build())
+        awaitPrepared()
         until(what = "rejected") { state() == ConnectionState.REJECTED }
         assertEquals("key_unknown_or_revoked", BugCapsule.status().connection.reason)
         assertNotNull(BugCapsule.status().connection.message)
@@ -285,6 +294,7 @@ class TokenSetupTest {
         answer = { MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
         val started = System.nanoTime()
         BugCapsule.init(app, qa(token()))
+        awaitPrepared()
         assertTrue("init does not wait for the network", (System.nanoTime() - started) / 1_000_000 < 2_000)
         until(what = "config request") { seen.isNotEmpty() }
         assertEquals(ConnectionState.CONNECTING, state())
@@ -296,6 +306,7 @@ class TokenSetupTest {
     fun serverErrorsAreOfflineNotFatal() {
         answer = { MockResponse().setResponseCode(503).setBody("""{"code":"unavailable"}""") }
         BugCapsule.init(app, qa(token()))
+        awaitPrepared()
         until(what = "offline") { state() == ConnectionState.OFFLINE }
         assertEquals("HTTP 503", BugCapsule.status().connection.reason)
         assertTrue(BugCapsule.isRecording)
@@ -306,6 +317,7 @@ class TokenSetupTest {
         val port = server.port
         server.shutdown() // nothing listens: connection refused
         BugCapsule.init(app, qa(token("http://127.0.0.1:$port")))
+        awaitPrepared()
         until(what = "offline") { state() == ConnectionState.OFFLINE }
         val s = BugCapsule.status().connection
         assertTrue(s.message!!, s.message!!.contains("could not be reached"))

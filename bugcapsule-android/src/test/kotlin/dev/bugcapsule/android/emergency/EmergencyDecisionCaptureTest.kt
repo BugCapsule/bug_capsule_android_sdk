@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.emergency
 
 import android.app.Activity
+import dev.bugcapsule.android.internal.awaitPrepared
 import android.app.Application
 import android.app.Instrumentation
 import android.content.Context
@@ -142,6 +143,7 @@ class EmergencyDecisionCaptureTest {
             app,
             BugCapsuleConfig.builder().mode(mode).gitSha("abc123").autoCaptureOnFailure(false).beforeRecord(hook).apply(configure).build(),
         )
+        awaitPrepared()
     }
 
     private fun runtime(): Runtime = BugCapsule.runtimeForTest()!!
@@ -390,6 +392,7 @@ class EmergencyDecisionCaptureTest {
             capsuleBytes = CapsuleCodec.encode(c)
             assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
             BugCapsule.init(app, BugCapsuleConfig.builder().build())
+            awaitPrepared()
             val engine = BugCapsuleReplay.awaitEngine(1000)!!
             // The blocked path is the one that dies: a real signal would end this test's process.
             BugCapsule.registerAction("pay") {
@@ -453,6 +456,7 @@ class EmergencyDecisionCaptureTest {
         assertRecorded(BugCapsule.emergency.evaluate(key, subject))
         // BugCapsule running, the guard not initialized.
         BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        awaitPrepared()
         assertTrue(BugCapsule.isReplaying)
         assertRecorded(BugCapsule.emergency.evaluate(key, subject))
         // The guard initialized: its engine answers.
@@ -496,6 +500,7 @@ class EmergencyDecisionCaptureTest {
                 data
             }.build(),
         )
+        awaitPrepared()
         repeat(5) { BugCapsule.emergency.evaluate(key) }
         assertEquals(0, hookCalls)
         assertTrue(BugCapsule.emergency.decisionsComplete)
@@ -563,6 +568,7 @@ class EmergencyDecisionCaptureTest {
         capsuleBytes = CapsuleCodec.encode(capsule)
         assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
         BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        awaitPrepared()
         BugCapsule.registerAction("pay") { pay() }
         val report = BugCapsuleReplay.awaitEngine(1000)!!.run(FakeDriver())
         BugCapsule.resetForTest()

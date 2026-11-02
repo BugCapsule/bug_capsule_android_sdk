@@ -135,6 +135,13 @@ come from the package info.
 - **It never breaks your app.** `init` never throws and never blocks on the
   network. A token that can't be used logs one line under the `BugCapsule` tag
   saying what to fix, and the app runs without uploads.
+- **It does no disk I/O on the calling thread.** The SDK's files (cached
+  project settings, crash journals, the launch snapshot of allowlisted
+  storage) are read on its own thread, so `init` returns right away and
+  `BugCapsule.isRecording` turns true shortly after. Events, logs and scope
+  changes made in between are kept in memory (up to 256 of each) and applied
+  once it is ready; `captureException` returns `null` then, and its event is
+  sent once ready.
 
 ### 3. Check the connection
 
@@ -544,6 +551,34 @@ personal data that isn't a credential, or secrets in binary bodies. Inspect
 real capsules with `bugcapsule inspect` before a wider rollout. More:
 [Privacy and redaction](https://docs.bugcapsule.com/privacy.html).
 
+### Consent and local data
+
+```kotlin
+// Collect nothing until the user agrees (the default is true).
+BugCapsule.init(this, BugCapsuleConfig.builder().token(token).collectionEnabled(false).build())
+
+// Later, from your consent screen. The choice is saved and wins over the default.
+BugCapsule.setCollectionEnabled(true)
+
+// "Delete my data": what BugCapsule stored on this device.
+BugCapsule.clearLocalData()
+```
+
+- `setCollectionEnabled(false)` stops capture and monitoring at once,
+  uploads nothing more and deletes what was queued or saved. Turning it back
+  on starts collection at the next launch. It can be called before `init`.
+- `clearLocalData()` deletes, in the background, queued and saved capsules,
+  queued monitoring events, crash journals and native crash records of
+  earlier launches, the cached project settings and the monitoring scope,
+  session and install id. It keeps the emergency policy cache, so feature
+  guards keep working offline, and the consent choice. The running session's
+  recording stays in memory: call `setCollectionEnabled(false)` first to drop
+  it too.
+- Saved capsules are deleted after 7 days (`savedCaptureMaxAgeMs`), and
+  queued ones after 7 days too (`OutboxLimits.maxAgeMs`).
+- Everything is stored under `noBackupFilesDir/bugcapsule`, which is never
+  backed up.
+
 ## Emergency recovery (feature guards)
 
 Emergency policies let you switch a named feature off, or into a safe mode,
@@ -659,7 +694,10 @@ Platform limits in this release:
 - Read the [production checklist](https://docs.bugcapsule.com/production.html).
 
 Data waits in a bounded outbox (10 capsules / 10 MiB / 7 days) and is retried
-with backoff. Storage and network errors never reach your app. Details:
+with backoff. In memory, the recorder keeps at most `maxRetainedBytes` of
+events (default 8 MiB): over it the oldest HTTP bodies and interaction
+payloads are dropped first, then the oldest events, and capsules list
+`capture.truncated` in their eligibility. Storage and network errors never reach your app. Details:
 [docs/how-it-works.md](docs/how-it-works.md#storage-and-uploads).
 
 ## Limitations

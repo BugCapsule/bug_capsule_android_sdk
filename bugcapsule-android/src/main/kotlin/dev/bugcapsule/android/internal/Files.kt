@@ -47,9 +47,15 @@ internal object Files {
 
 /**
  * On-device files under `noBackupFilesDir/bugcapsule`: saved capsules (the
- * newest [maxSaved]), the cached remote config and the outbox directory.
+ * newest [maxSaved], none older than [maxAgeMs]), the cached remote config
+ * and the outbox directory.
  */
-internal class CapsuleStore(val root: File, private val maxSaved: Int = 20) {
+internal class CapsuleStore(
+    val root: File,
+    private val maxSaved: Int = 20,
+    private val maxAgeMs: Long = SAVED_CAPTURE_MAX_AGE_MS,
+    private val nowMs: () -> Long = System::currentTimeMillis,
+) {
     val capturesDir = File(root, "captures")
     val outboxDir = File(root, "outbox")
     val configFile = File(root, "remote_config.json")
@@ -58,6 +64,7 @@ internal class CapsuleStore(val root: File, private val maxSaved: Int = 20) {
         capturesDir.mkdirs()
         Files.removeTemporaryFiles(capturesDir)
         Files.removeTemporaryFiles(root)
+        prune()
     }
 
     @Throws(java.io.IOException::class)
@@ -68,15 +75,27 @@ internal class CapsuleStore(val root: File, private val maxSaved: Int = 20) {
         return file
     }
 
-    fun savedCaptures(): List<File> = (capturesDir.listFiles { f -> f.isFile && f.name.endsWith(".bugcapsule") }
+    /** Saved capsules, newest first; expired ones are left out (and deleted by the next prune). */
+    fun savedCaptures(): List<File> = all().filter { !expired(it) }
+
+    private fun all(): List<File> = (capturesDir.listFiles { f -> f.isFile && f.name.endsWith(".bugcapsule") }
         ?: emptyArray()).sortedByDescending { it.lastModified() }
 
-    private fun prune() {
-        savedCaptures().drop(maxSaved).forEach { Files.deleteQuietly(it) }
+    private fun expired(f: File) = nowMs() - f.lastModified() > maxAgeMs
+
+    /** Deletes capsules past [maxAgeMs] and all but the newest [maxSaved]. */
+    fun prune() {
+        val (old, fresh) = all().partition { expired(it) }
+        (old + fresh.drop(maxSaved)).forEach { Files.deleteQuietly(it) }
     }
 
     /** Kill switch: nothing captured before may leave the device later. */
     fun clearSavedCaptures() {
-        savedCaptures().forEach { Files.deleteQuietly(it) }
+        all().forEach { Files.deleteQuietly(it) }
+    }
+
+    companion object {
+        /** Default age after which saved capsules are deleted (BC-ENT-038). */
+        const val SAVED_CAPTURE_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
     }
 }
