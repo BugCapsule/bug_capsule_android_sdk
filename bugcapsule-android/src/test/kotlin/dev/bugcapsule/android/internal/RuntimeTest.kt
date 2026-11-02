@@ -76,7 +76,7 @@ class RuntimeTest {
     private fun start(withBackend: Boolean, vararg integrations: dev.bugcapsule.android.BugCapsuleIntegration) {
         BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.root, if (withBackend) transport else null)
         val b = BugCapsuleConfig.builder().mode(CaptureMode.QA).redactKeys("loyaltyId").gitSha("abc123")
-        if (withBackend) b.backend("http://backend.test", "bci_test_key_000000000000000")
+        if (withBackend) b.backend("https://backend.test", "bci_test_key_000000000000000")
         BugCapsule.init(app, b.build(), integrations.toList())
     }
 
@@ -128,6 +128,11 @@ class RuntimeTest {
         val prefs = (capsule.checkpoint.data["shared_preferences"] as Map<*, *>)["prefs"] as Map<*, *>
         assertEquals(mapOf("type" to "int", "value" to 3L), prefs["visits"])
         assertTrue(capsule.manifest.eligibility.missing.any { it.dependency == "storage.prefs/api_token" })
+        // The capture policy travels with the capsule, for early restore.
+        assertEquals(
+            mapOf("shared_preferences" to mapOf("prefs" to mapOf("allow" to listOf(""), "deny" to emptyList<String>()))),
+            capsule.manifest.storagePolicy,
+        )
     }
 
     @Test

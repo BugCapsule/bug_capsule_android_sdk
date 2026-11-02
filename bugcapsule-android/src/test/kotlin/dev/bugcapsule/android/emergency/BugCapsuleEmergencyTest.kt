@@ -156,6 +156,26 @@ class BugCapsuleEmergencyTest {
     }
 
     @Test
+    fun aRefusedExplicitBackendUsesFailureModesWithoutNetwork() {
+        policiesBody = signer.envelope(document(9))
+        for ((url, key) in listOf(server.url("/").toString() to "bcs_secret_key_0123456789", "http://api.example.com" to "bct_test_key_0123456789")) {
+            BugCapsule.resetForTest()
+            BugCapsule.emergency.testHooks = hooks()
+            BugCapsule.emergency.initialize(
+                app,
+                EmergencyConfig.builder().trustAnchor(signer.anchor()).backend(url, key)
+                    .failureMode("payments.*", EmergencyFailureMode.FAIL_CLOSED).build(),
+            )
+            assertTrue(BugCapsule.emergency.isInitialized)
+            val status = BugCapsule.emergency.refreshPolicies().get(10, TimeUnit.SECONDS)
+            assertNull(url, status.revision)
+            assertEquals(EmergencyAction.BLOCK, BugCapsule.emergency.evaluate("payments.send").action)
+            assertTrue(BugCapsule.emergency.isFeatureAllowed("search.query"))
+        }
+        assertTrue(requests.isEmpty())
+    }
+
+    @Test
     fun invalidAnchorUsesFailureModesWithoutNetwork() {
         BugCapsule.emergency.testHooks = hooks()
         BugCapsule.emergency.initialize(app, config("not-an-anchor").failureMode("payments.*", EmergencyFailureMode.FAIL_CLOSED).build())

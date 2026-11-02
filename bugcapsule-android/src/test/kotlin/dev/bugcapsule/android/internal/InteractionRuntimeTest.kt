@@ -71,7 +71,7 @@ class InteractionRuntimeTest {
     private fun start(withBackend: Boolean) {
         BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.root, if (withBackend) transport else null)
         val b = BugCapsuleConfig.builder().mode(CaptureMode.QA).gitSha("abc123")
-        if (withBackend) b.backend("http://backend.test", "bci_test_key_000000000000000")
+        if (withBackend) b.backend("https://backend.test", "bci_test_key_000000000000000")
         BugCapsule.init(app, b.build(), listOf(bridge))
     }
 

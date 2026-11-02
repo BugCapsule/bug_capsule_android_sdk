@@ -1,6 +1,7 @@
 package dev.bugcapsule.android.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Shared conformance fixtures generated from the Dart reference (runtimes-v1 §13). */
@@ -94,22 +95,7 @@ class ConformanceTest {
         assert(all.size >= 27)
         for (c in all) {
             val name = c["name"] as String
-            val reports = (c["reports"] as List<Map<String, Any?>>).map { r ->
-                ReplayReport(
-                    outcome = ReplayOutcome.parse(r["outcome"] as String),
-                    attempt = 1,
-                    durationMs = 100,
-                    strategy = ReplayStrategy.AUTO,
-                    expectedSignature = r["expectedSignature"] as String?,
-                    eventsDispatched = J.int(r["eventsDispatched"]) ?: 0,
-                    eventsExpected = J.int(r["eventsExpected"]),
-                    divergences = (r["divergences"] as List<String>? ?: emptyList()).map { Divergence(it, "x") },
-                    otherFailures = (r["otherFailures"] as List<String>? ?: emptyList()).map {
-                        FailureRecord(FailureKind.EXCEPTION, it, "E", "", 0)
-                    },
-                    message = r["message"] as String?,
-                )
-            }
+            val reports = (c["reports"] as List<Map<String, Any?>>).map { fixtureReport(it) }
             val e = Verdicts.evaluate(if (c["kind"] == "replay") RunKind.REPLAY else RunKind.VERIFY, J.int(c["requested"])!!, reports)
             assertEquals(name, c["verdict"], e.verdict.dartName)
             assertEquals(name, c["wire"], e.verdict.wire)
@@ -117,6 +103,49 @@ class ConformanceTest {
             assertEquals(name, J.int(c["validAttempts"]), e.validAttempts)
             assertEquals(name, c["attemptStatuses"], e.attempts.map { it.status.name.lowercase() })
             assertEquals(name, c["reasonCodes"], e.reasonCodes)
+        }
+        assertTrue("v1 unsafe cases", all.any { it["verdict"] == "unsafe" && J.int(it["exitCode"]) == 5 })
+    }
+
+    private fun fixtureReport(r: Map<String, Any?>) = ReplayReport(
+        outcome = ReplayOutcome.parse(r["outcome"] as String),
+        attempt = 1,
+        durationMs = 100,
+        strategy = ReplayStrategy.AUTO,
+        expectedSignature = r["expectedSignature"] as String?,
+        eventsDispatched = J.int(r["eventsDispatched"]) ?: 0,
+        eventsExpected = J.int(r["eventsExpected"]),
+        divergences = (r["divergences"] as List<String>? ?: emptyList()).map { Divergence(it, "x") },
+        otherFailures = (r["otherFailures"] as List<String>? ?: emptyList()).map {
+            FailureRecord(FailureKind.EXCEPTION, it, "E", "", 0)
+        },
+        message = r["message"] as String?,
+        evidence = J.obj(r["evidence"])?.let { ReplayEvidence.fromJson(it) },
+    )
+
+    @Test
+    fun verdictsV2() {
+        val doc = SpecFixtures.json("conformance/verdicts.json")
+        val cases = doc["verifyV2"] as List<Map<String, Any?>>
+        assertTrue(cases.size >= 15)
+        for (c in cases) {
+            val name = c["name"] as String
+            val e = Verdicts.evaluateVerifyV2(
+                J.int(c["requested"])!!,
+                (c["reports"] as List<Map<String, Any?>>).map { fixtureReport(it) },
+                J.obj(c["baseline"])?.let { BaselineResult.fromJson(it) },
+                EligibilityStatus.parse(c["eligibility"] as String),
+            )
+            assertEquals(name, c["verdict"], e.verdict.dartName)
+            assertEquals(name, c["wire"], e.verdict.wire)
+            assertEquals(name, J.int(c["exitCode"]), e.exitCode)
+            assertEquals(name, c["reasonCodes"], e.reasonCodes)
+        }
+        for (c in doc["requiredAttempts"] as List<Map<String, Any?>>) {
+            val r = J.int(c["baselineReproduced"])!!
+            val n = J.int(c["baselineAttempts"])!!
+            assertEquals("$r/$n", (c["wilsonLower"] as Number).toDouble(), Verdicts.wilsonLower(r, n), 5e-5)
+            assertEquals("$r/$n", J.int(c["required"]), Verdicts.requiredCandidateAttempts(r, n))
         }
     }
 }

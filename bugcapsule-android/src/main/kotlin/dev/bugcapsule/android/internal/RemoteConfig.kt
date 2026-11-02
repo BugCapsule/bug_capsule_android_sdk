@@ -6,6 +6,9 @@ import dev.bugcapsule.android.core.Json
 import java.io.File
 import java.util.Random
 
+/** Ceiling for the server's `maxCapsuleBytes` (the backend's own maximum). */
+internal const val MAX_REMOTE_CAPSULE_BYTES = 50L * 1024 * 1024
+
 /** Capture config the backend can change at runtime (kill switch, sampling, bodies, redaction, monitoring). */
 data class RemoteCaptureConfig(
     val enabled: Boolean,
@@ -23,7 +26,11 @@ data class RemoteCaptureConfig(
     val tracesSampleRate: Double? = null,
     val sessionTracking: Boolean = true,
     val maxBreadcrumbs: Int? = null,
-    /** When set, replaces the app's `tracePropagationTargets`. */
+    /**
+     * When set, narrows the app's `tracePropagationTargets`: a URL must match
+     * the app's list and contain one of these entries (plain substrings, never
+     * patterns). It can't add destinations.
+     */
     val tracePropagationTargets: List<String>? = null,
     /**
      * capsule-v2 §7: interaction adapter ids (e.g. `bugcapsule-okhttp.websocket`)
@@ -72,7 +79,10 @@ data class RemoteCaptureConfig(
             return RemoteCaptureConfig(
                 enabled = field("enabled", Boolean::class.javaObjectType) ?: true,
                 sampleRate = if (rate.isNaN()) 0.0 else rate.coerceIn(0.0, 1.0),
-                maxCapsuleBytes = maxBytes.coerceAtLeast(1),
+                // The backend accepts at most 50 MiB per capsule; a larger value can only
+                // come from a misconfigured or compromised server, and also sizes the
+                // on-disk crash journal (2x).
+                maxCapsuleBytes = maxBytes.coerceIn(1, MAX_REMOTE_CAPSULE_BYTES),
                 captureNetworkBodies = field("captureNetworkBodies", Boolean::class.javaObjectType) ?: true,
                 redactKeys = (field("redactKeys", List::class.java) ?: emptyList<Any?>()).map { it.toString() },
                 configTtlSeconds = ttl.coerceIn(0, 86_400),

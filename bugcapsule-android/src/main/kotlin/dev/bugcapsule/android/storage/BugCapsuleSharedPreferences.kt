@@ -82,6 +82,8 @@ class BugCapsuleSharedPreferences private constructor(
 
     override fun capabilities() = mapOf("storage.shared_preferences" to "supported")
 
+    internal fun rules() = StoragePolicy.rules(allow, deny)
+
     class Builder {
         private val allow = LinkedHashMap<String, MutableList<String>>()
         private val deny = LinkedHashMap<String, MutableList<String>>()

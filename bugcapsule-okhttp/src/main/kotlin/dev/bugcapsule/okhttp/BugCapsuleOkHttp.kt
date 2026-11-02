@@ -69,6 +69,11 @@ fun interface RequestFilter {
  * app reads it (same bytes, same timing) and only a bounded prefix is kept
  * (`maxBodyBytes`, binary [maxBinaryBytes]); one-shot and duplex request
  * bodies are never read (keyed without a hash, recorded as `omitted`).
+ * Binary and non-UTF-8 bodies are recorded as `omitted` with only their size
+ * and content type (`responseBodyBytes` / `responseContentType`, and the
+ * `request…` equivalents) unless [captureBinaryBodies] is set, which records
+ * them as base64. Bodies are captured at all only when the session's
+ * `captureNetworkBodies` is on (off by default in production).
  *
  * Monitoring (monitoring-v1 §8): each call is an `http.client` span of the
  * active transaction, and requests to `tracePropagationTargets` carry
@@ -86,6 +91,8 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
     /** A response still streaming after this long is recorded as `truncated`. */
     val maxBodyWaitMs: Long = 30_000,
     val exclude: RequestFilter? = null,
+    /** Records binary / non-UTF-8 bodies (up to [maxBinaryBytes]) as base64; off records only size and content type. */
+    val captureBinaryBodies: Boolean = false,
 ) : BugCapsuleIntegration {
     val keys = RequestKeyBuilder(rules, ignoreQuery, ignoreBodyFields)
 
@@ -126,7 +133,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
         if (missing > 0) {
             eligibility.missing(
                 "network.bodies",
-                "$missing recorded responses have no body (capture disabled, excluded or too large)",
+                "$missing recorded responses have no body (capture disabled, excluded, binary or too large)",
             )
         }
     }
@@ -223,8 +230,14 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
     private fun requestContentType(request: Request): String? =
         request.body?.contentType()?.toString() ?: request.header("Content-Type")
 
-    /** Decodes a complete body: redacted JSON, form fields, scrubbed text, or small binary as base64. */
-    internal fun decode(s: BugCapsuleSession, bytes: ByteArray, contentType: String?): Pair<Any?, String> {
+    /**
+     * Decodes a complete body: redacted JSON, form fields, scrubbed text, or
+     * binary: small binary as base64 for the request key ([forKey], so keys
+     * stay the same) and, with [captureBinaryBodies], for the record; else
+     * `omitted` (the caller records size and content type).
+     */
+    internal fun decode(s: BugCapsuleSession, bytes: ByteArray, contentType: String?, forKey: Boolean = false): Pair<Any?, String> {
+        val asBinary = { if (forKey || captureBinaryBodies) binary(bytes) else null to "omitted" }
         if (bytes.isEmpty()) return null to "json"
         val redactor = s.redactor
         val type = (contentType ?: "").lowercase()
@@ -232,7 +245,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
             val text = try {
                 Json.decodeUtf8(bytes)
             } catch (_: JsonFormatException) {
-                return binary(bytes)
+                return asBinary()
             }
             if (type.contains("json") || type.isEmpty()) {
                 return try {
@@ -252,7 +265,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
             }
             return redactor.scrubText(text) to "text"
         }
-        return binary(bytes)
+        return asBinary()
     }
 
     private fun binary(bytes: ByteArray): Pair<Any?, String> =
@@ -282,7 +295,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
         val contentType = requestContentType(request)
         var keyBody: Any? = null
         if (body != null && body.complete && body.bytes.size <= maxKeyBodyBytes && !isMultipart(contentType)) {
-            keyBody = decode(s, body.bytes, contentType).first
+            keyBody = decode(s, body.bytes, contentType, forKey = true).first
         }
         return keys.keyFor(request.method, uri, keyBody)
     }
@@ -320,6 +333,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
         fun base(): MutableMap<String, Any?> {
             var requestBody: Any? = null
             var requestEncoding = "json"
+            var binaryRequest: Int? = null
             if (requestBytes != null && (requestBytes.bytes.isNotEmpty() || requestBytes.unreadable || !requestBytes.complete)) {
                 when {
                     !captureBodies || isMultipart(requestType) || requestBytes.unreadable -> requestEncoding = "omitted"
@@ -327,6 +341,7 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
                         decode(s, requestBytes.bytes, requestType).let { (b, e) ->
                             requestBody = b
                             requestEncoding = e
+                            if (e == "omitted") binaryRequest = requestBytes.bytes.size
                         }
                     else -> requestEncoding = "truncated"
                 }
@@ -346,6 +361,10 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
             }
             out["requestBody"] = requestBody
             out["requestEncoding"] = requestEncoding
+            if (binaryRequest != null) {
+                out["requestBodyBytes"] = binaryRequest
+                out["requestContentType"] = requestType
+            }
             if (excluded) out["excluded"] = true
             return out
         }
@@ -396,10 +415,20 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
             record(s) { head().apply { put("durationMs", elapsed()); put("bodyEncoding", "omitted") } }
             return response
         }
-        val limit = if (isText((contentType ?: "").lowercase())) s.maxBodyBytes else maxBinaryBytes
-        val tapped = TappedBody(body, limit)
+        val text = isText((contentType ?: "").lowercase())
+        val limit = if (text) s.maxBodyBytes else maxBinaryBytes
+        // Binary without captureBinaryBodies: nothing is kept, only the size is counted.
+        val tapped = TappedBody(body, limit, retain = text || captureBinaryBodies)
         tapped.onFinish = { extra ->
-            if (inFlight.remove(token) != null) record(s) { head().apply { put("durationMs", elapsed()); putAll(extra) } }
+            if (inFlight.remove(token) != null) {
+                record(s) {
+                    head().apply {
+                        put("durationMs", elapsed())
+                        putAll(extra)
+                        if (extra["bodyEncoding"] == "omitted") put("responseContentType", contentType)
+                    }
+                }
+            }
         }
         tapped.decode = { bytes -> decode(s, bytes, contentType) }
         tapped.errorJson = { e -> errorJson(s, e, chain.call().isCanceled()) }
@@ -425,12 +454,17 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
      * Passes the response through unchanged (same source object for every
      * `source()` call) while keeping the first [limit] bytes.
      */
-    private class TappedBody(private val original: ResponseBody, private val limit: Int) : ResponseBody() {
+    private class TappedBody(
+        private val original: ResponseBody,
+        private val limit: Int,
+        private val retain: Boolean = true,
+    ) : ResponseBody() {
         var onFinish: (Map<String, Any?>) -> Unit = {}
         var decode: (ByteArray) -> Pair<Any?, String> = { null to "truncated" }
         var errorJson: (IOException) -> Map<String, Any?> = { emptyMap() }
         private val done = AtomicBoolean(false)
-        private var retained: Buffer? = Buffer()
+        private var retained: Buffer? = if (retain) Buffer() else null
+        private var total = 0L
 
         @Volatile
         private var complete = false
@@ -459,7 +493,9 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
                     guard {
                         if (n == -1L) {
                             complete = true
-                            if (!done.get()) {
+                            if (!done.get() && !retain) {
+                                finish(mapOf("bodyEncoding" to "omitted", "responseBodyBytes" to total))
+                            } else if (!done.get()) {
                                 val bytes = synchronized(this@TappedBody) { retained?.readByteArray() }
                                 if (bytes != null) {
                                     val (body, encoding) = try {
@@ -467,9 +503,13 @@ class BugCapsuleOkHttp @JvmOverloads constructor(
                                     } catch (_: Exception) {
                                         null to "truncated"
                                     }
-                                    finish(mapOf("responseBody" to body, "bodyEncoding" to encoding))
+                                    val extra = linkedMapOf<String, Any?>("responseBody" to body, "bodyEncoding" to encoding)
+                                    if (encoding == "omitted") extra["responseBodyBytes"] = bytes.size.toLong()
+                                    finish(extra)
                                 }
                             }
+                        } else if (!retain) {
+                            total += n
                         } else if (n > 0) {
                             synchronized(this@TappedBody) {
                                 val r = retained

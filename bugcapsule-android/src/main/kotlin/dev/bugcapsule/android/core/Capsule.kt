@@ -304,6 +304,12 @@ data class CapsuleManifest(
     val patch: PatchIdentity? = null,
     /** crash-capsules §2 `stats.journalGapMs`: crash time minus the last journaled event's time. */
     val journalGapMs: Long? = null,
+    /**
+     * What storage capture was allowed to record (`StoragePolicy` JSON:
+     * `{kind: {name: {allow, deny}}}`); early restore writes only that. Null
+     * when no storage integration was set up.
+     */
+    val storagePolicy: Map<String, Any?>? = null,
 ) {
     val runtimeName: String get() = runtime?.name ?: RuntimeInfo.infer(sdkName)
 
@@ -335,6 +341,7 @@ data class CapsuleManifest(
         if (monitoring != null) it["monitoring"] = monitoring
         if (dependencies.isNotEmpty()) it["dependencies"] = dependencies.map { d -> d.toJson() }
         if (patch != null) it["patch"] = patch.toJson()
+        if (storagePolicy != null) it["storagePolicy"] = storagePolicy
     }
 
     companion object {
@@ -371,6 +378,7 @@ data class CapsuleManifest(
                 capabilities = (J.obj(j["capabilities"]) ?: emptyMap()).mapValues { it.value as String },
                 monitoring = J.obj(j["monitoring"]),
                 patch = J.obj(j["patch"])?.let { PatchIdentity.fromJson(it) },
+                storagePolicy = J.obj(j["storagePolicy"]),
                 dependencies = if (specVersion < 2) {
                     emptyList()
                 } else {

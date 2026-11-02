@@ -253,7 +253,10 @@ class Redactor @JvmOverloads constructor(
                 "|gh[pousr]_[A-Za-z0-9]{20,}" +
                 "|xox[abprs]-[A-Za-z0-9-]{10,}" +
                 "|AIza[0-9A-Za-z_-]{30,}" +
-                "|bc[is]_[A-Za-z0-9_-]{20,})",
+                // Every BugCapsule credential (bci_/bcs_, bct_ and bcsdk.v<n>.,
+                // bca_, bcw_/bcp_/bcv_, bcpd_); trust anchors are public.
+                "|bc(?:[isawpvt]|pd)_[A-Za-z0-9_-]{20,}" +
+                "|bcsdk\\.v[0-9]+\\.[A-Za-z0-9_-]{20,})",
         )
 
         // JavaScript `.` excludes \n \r    ; spelled out so Java's
