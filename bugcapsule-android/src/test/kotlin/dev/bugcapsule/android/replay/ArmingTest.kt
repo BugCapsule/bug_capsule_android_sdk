@@ -21,7 +21,10 @@ import dev.bugcapsule.android.core.Checkpoint
 import dev.bugcapsule.android.core.CheckpointKind
 import dev.bugcapsule.android.core.Json
 import dev.bugcapsule.android.core.ReplaySettings
+import dev.bugcapsule.android.storage.BugCapsuleDataStore
+import dev.bugcapsule.android.storage.BugCapsuleSharedPreferences
 import dev.bugcapsule.android.storage.DataStoreFiles
+import dev.bugcapsule.android.storage.StoragePolicy
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -87,8 +90,12 @@ class ArmingTest {
         }
     }
 
-    private fun capsuleWith(data: Map<String, Any?>, kind: CheckpointKind = CheckpointKind.LAUNCH) =
-        CapsuleCodec.encode(TestCapsules.capsule(emptyList(), checkpoint = Checkpoint(kind, 0, 1_760_000_000_000, 0, data)))
+    private fun capsuleWith(data: Map<String, Any?>, kind: CheckpointKind = CheckpointKind.LAUNCH, storagePolicy: Map<String, Any?>? = null) =
+        CapsuleCodec.encode(
+            TestCapsules.capsule(emptyList(), checkpoint = Checkpoint(kind, 0, 1_760_000_000_000, 0, data)).let {
+                it.copy(manifest = it.manifest.copy(storagePolicy = storagePolicy))
+            },
+        )
 
     @Test
     fun replayIsRefusedForNonDebuggableApps() {
@@ -124,6 +131,12 @@ class ArmingTest {
                 ),
                 "datastore" to mapOf("settings" to mapOf("currency" to mapOf("type" to "string", "value" to "USD"), "n" to mapOf("type" to "int", "value" to 2L))),
             ),
+            storagePolicy = StoragePolicy.of(
+                listOf(
+                    BugCapsuleSharedPreferences.builder().allowFile("shop_prefs").build(),
+                    BugCapsuleDataStore.builder().allow("settings").build(),
+                ),
+            )!!.toJson(),
         )
         assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
         val prefs = app.getSharedPreferences("shop_prefs", Context.MODE_PRIVATE)
@@ -133,7 +146,7 @@ class ArmingTest {
         assertEquals(0.5f, prefs.getFloat("ratio", 0f))
         assertTrue(prefs.getBoolean("seen", false))
         assertEquals(setOf("a", "b"), prefs.getStringSet("tags", null))
-        val ds = DataStoreFiles.read(DataStoreFiles.file(app, "settings"))!!
+        val ds = DataStoreFiles.read(DataStoreFiles.file(app, "settings")!!)!!
         assertEquals("USD", ds["currency"])
         assertEquals(2, ds["n"])
         assertTrue(BugCapsuleReplay.armed()!!.earlyDivergences.any { it.type == "storage.redacted" && it.detail == "shop_prefs/auth_token" })
@@ -160,6 +173,32 @@ class ArmingTest {
         assertTrue(report.divergences.none { it.detail.contains("cart") })
         assertEquals("a1", report.attemptId)
         assertNull(report.observed)
+    }
+
+    @Test
+    fun checkAndExpectFeedTheReplayEvidence() {
+        debuggable(true)
+        capsuleBytes = capsuleWith(emptyMap())
+        assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
+        BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        val engine = BugCapsuleReplay.awaitEngine(1000)!!
+        BugCapsule.check("other.assertion", true)
+        BugCapsule.check("boom", true) // The capsule's assertion (TestCapsules.failure).
+        BugCapsule.expect("cart.total_positive") { true }
+        BugCapsule.expect("throws") { error("broken") }
+        val evidence = engine.buildReport().evidence!!
+        assertEquals(true, evidence.assertionPassed)
+        assertEquals(mapOf("cart.total_positive" to true, "throws" to false), evidence.postconditions)
+        assertEquals(dev.bugcapsule.android.core.EvidenceLevel.NONE, evidence.level)
+    }
+
+    @Test
+    fun expectOutsideReplayDoesNothing() {
+        BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        var calls = 0
+        BugCapsule.expect("never") { calls++; true }
+        BugCapsule.check("boom", true)
+        assertEquals(0, calls)
     }
 
     @Test

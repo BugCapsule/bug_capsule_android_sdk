@@ -38,7 +38,10 @@ coroutine exceptions reach the default handler).
 - **Navigation** destinations (`route`, `source: "navigation"`).
 - **Network**: OkHttp exchanges; the response body source is tapped while the
   app reads it (same bytes and timing), keeping a bounded prefix (256 KiB text,
-  64 KiB binary); one-shot/duplex request bodies are never read.
+  64 KiB binary); one-shot/duplex request bodies are never read. Bodies are
+  off by default in production mode (`captureNetworkBodies` overrides), and
+  binary or non-UTF-8 bodies keep only their size and content type unless
+  `BugCapsuleOkHttp(captureBinaryBodies = true)`.
 - **WebSockets** (`BugCapsuleWebSockets`, `bugcapsule-okhttp`) and **native
   SDK adapters** (`NativeAdapter`): see
   [Interaction dependencies](#interaction-dependencies).
@@ -174,7 +177,9 @@ capsule rules before it is written.**
 Remote settings: `monitoringEnabled: false` stops envelopes and deletes queued
 ones (capsules unaffected); `errorSampleRate`, `tracesSampleRate` (overrides
 the app's rate unless it set a `tracesSampler`), `sessionTracking`,
-`maxBreadcrumbs`, `tracePropagationTargets` (replaces the app's list).
+`maxBreadcrumbs`, `tracePropagationTargets` (can only narrow the app's list:
+a URL must match the app's list and contain one of the server's entries, which
+are plain substrings, never patterns).
 
 ### Native crashes (`bugcapsule-ndk`)
 
@@ -275,7 +280,13 @@ dev.bugcapsule.android.replay.BugCapsuleReplayTest <testAppId>/<runner>`.
 
 `BugCapsuleReplayRunner.onCreate` (before `Application.onCreate`) fetches the
 capsule, **refuses unless the app is debuggable**, and restores
-SharedPreferences/DataStore. `BugCapsule.init` then starts in replay mode. The
+SharedPreferences/DataStore. Only files and keys the capture-time policy
+allowed are written (the manifest's `storagePolicy`, recorded from the
+`BugCapsuleSharedPreferences` / `BugCapsuleDataStore` allow and deny lists):
+names must be plain file names inside `shared_prefs` / `files/datastore`,
+BugCapsule's own `bugcapsule*` files are never written, and a capsule without
+a policy restores no storage. Each refused write is a material
+`restore.disallowed` divergence. `BugCapsule.init` then starts in replay mode. The
 test launches the launcher activity with `ActivityScenario` and runs the
 in-app engine: pointers via `Instrumentation.sendPointerSync` (dp → px, scaled
 if the screen differs), Back via `sendKeySync`, actions and text on the main
@@ -528,7 +539,7 @@ never captured).
 - Uploads happen only after a successful config fetch, or with a cached one
   younger than 7 days.
 - Outbox: 10 capsules / 10 MiB / 7 days, oldest evicted first.
-- Retries: 30 s → 1 h with ±20 % jitter and `Retry-After` for network errors,
+- Retries: 30 s → 1 h with ±20 % jitter and `Retry-After` (at most 24 h) for network errors,
   timeouts and temporary server errors; a capsule BugCapsule refuses is
   dropped.
 - Remote config is cached per address and credential, refreshed after its TTL

@@ -115,7 +115,10 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
 
     private val errorSampleRate: Double get() = env.remote?.errorSampleRate ?: config.errorSampleRate
 
-    val tracePropagationTargets: List<String> get() = env.remote?.tracePropagationTargets ?: config.tracePropagationTargets
+    val tracePropagationTargets: List<String> get() = config.tracePropagationTargets
+
+    /** The server's list, which can only narrow [tracePropagationTargets]. */
+    private val remotePropagationTargets: List<String>? get() = env.remote?.tracePropagationTargets
 
     val sessionTrackingAllowed: Boolean get() = env.remote?.sessionTracking ?: true
 
@@ -643,7 +646,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
             it.setData("http.request.method", method.uppercase())
             clean.substringAfter('?', "").substringBefore('#').takeIf { q -> q.isNotEmpty() }?.let { q -> it.setData("http.query", q) }
         }
-        val propagate = active && PropagationTargets.matches(url, tracePropagationTargets)
+        val propagate = active && PropagationTargets.matches(url, tracePropagationTargets, remotePropagationTargets)
         return HttpSpanHandle(this, span, propagate)
     }
 

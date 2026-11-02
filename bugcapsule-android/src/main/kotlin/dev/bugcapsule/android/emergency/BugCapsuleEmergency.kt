@@ -131,7 +131,12 @@ class BugCapsuleEmergency internal constructor() {
                 null
             }
         }
-        val explicit: BugCapsuleBackendConfig? = config.backend ?: config.token?.let { token ->
+        // A refused explicit backend means no connection (not a fallback to the token).
+        val explicit: BugCapsuleBackendConfig? = if (config.backend != null) {
+            val refusal = ConnectionToken.explicitBackendRefusal(config.backend)
+            if (refusal != null) SdkLog.e("the emergency backend config is refused: $refusal; policies are not fetched")
+            config.backend.takeIf { refusal == null }
+        } else config.token?.let { token ->
             when (val parsed = ConnectionToken.parse(token)) {
                 is ParsedConnectionToken.Valid -> parsed.backend
                 is ParsedConnectionToken.Invalid -> {

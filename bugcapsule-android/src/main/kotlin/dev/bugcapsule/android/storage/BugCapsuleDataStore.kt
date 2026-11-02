@@ -68,7 +68,8 @@ class BugCapsuleDataStore private constructor(
     fun snapshot(context: Context, redactor: Redactor): Map<String, Any?> {
         val out = LinkedHashMap<String, Any?>()
         for (store in allow.keys) {
-            val prefs = DataStoreFiles.read(DataStoreFiles.file(context, store)) ?: emptyMap()
+            val file = DataStoreFiles.file(context, store) ?: continue
+            val prefs = DataStoreFiles.read(file) ?: emptyMap()
             val entries = LinkedHashMap<String, Any?>()
             for ((key, value) in prefs.toSortedMap()) {
                 if (!isAllowed(store, key)) continue
@@ -94,6 +95,8 @@ class BugCapsuleDataStore private constructor(
     }
 
     override fun capabilities() = mapOf("storage.datastore" to "supported")
+
+    internal fun rules() = StoragePolicy.rules(allow, deny)
 
     class Builder {
         private val allow = LinkedHashMap<String, MutableList<String>>()
@@ -121,7 +124,11 @@ class BugCapsuleDataStore private constructor(
 
 /** Reads and writes Preferences DataStore files without a DataStore instance. */
 internal object DataStoreFiles {
-    fun file(context: Context, name: String) = File(context.filesDir, "datastore/$name.preferences_pb")
+    /**
+     * `files/datastore/<name>.preferences_pb`, or null when [name] is not a
+     * plain file name or would resolve outside `files/datastore`.
+     */
+    fun file(context: Context, name: String): File? = StorageNames.resolve(StorageNames.dataStoreDir(context), name, ".preferences_pb")
 
     fun read(file: File): Map<String, Any?>? {
         if (!file.exists()) return null

@@ -289,12 +289,46 @@ object BugCapsule {
         rt.handleFailure(FailureRecord.assertion(assertionId, message, rt.now(), rt.redactor::scrubText))
     }
 
-    /** Raises [assertionId] when [condition] is false. */
+    /**
+     * Raises [assertionId] when [condition] is false. During replay a passing
+     * check of the capsule's assertion is the evidence a fix verification
+     * needs (verdict v2).
+     */
     @JvmStatic
     @JvmOverloads
     fun check(assertionId: String, condition: Boolean, message: String = "") {
-        if (!condition) fail(assertionId, message)
+        if (!condition) {
+            fail(assertionId, message)
+        } else {
+            runtime?.engine?.checkPassed(assertionId)
+        }
     }
+
+    private val postconditions = java.util.concurrent.ConcurrentHashMap<String, () -> Boolean>()
+
+    /**
+     * Registers a postcondition: what must be true after a capsule's scenario
+     * replays without its failure ("the cart total is positive"). Evaluated
+     * only in replay, once the replay settled; every registered postcondition
+     * is reported, and `bugcapsule verify` needs them to hold (or the
+     * capsule's own [check] to pass) to call a fix FIXED. One that throws
+     * counts as not holding. Outside replay this only stores [condition].
+     * Registering the same [name] again replaces it.
+     */
+    @JvmStatic
+    fun expect(name: String, condition: () -> Boolean) {
+        postconditions[name] = condition
+    }
+
+    /** Postcondition results, sorted by name; one that throws counts as not holding. */
+    internal fun evaluatePostconditions(): Map<String, Boolean> =
+        postconditions.toSortedMap().mapValues { (_, c) ->
+            try {
+                c()
+            } catch (_: Throwable) {
+                false
+            }
+        }
 
     /**
      * Reports a caught exception as a failure: recorded, captured as a
@@ -593,6 +627,7 @@ object BugCapsule {
         runtime = null
         connection = null
         actions.clear()
+        postconditions.clear()
         emergency.resetForTest()
         dev.bugcapsule.android.replay.BugCapsuleReplay.resetForTest()
     }

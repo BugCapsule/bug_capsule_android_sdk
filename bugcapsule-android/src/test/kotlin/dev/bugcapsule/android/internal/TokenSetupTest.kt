@@ -172,6 +172,31 @@ class TokenSetupTest {
     }
 
     @Test
+    fun aRefusedExplicitBackendNeverThrowsNorTouchesTheNetwork() {
+        val cases = listOf(
+            "http://api.example.com" to key,
+            "http://192.168.1.20:8787" to key,
+            api to "bcs_" + "s".repeat(43),
+        )
+        for ((url, ingestKey) in cases) {
+            ShadowLog.clear()
+            BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.newFolder())
+            BugCapsule.init(app, BugCapsuleConfig.builder().mode(CaptureMode.QA).backend(url, ingestKey).build())
+            val s = BugCapsule.status().connection
+            assertEquals(url, ConnectionState.NOT_CONFIGURED, s.state)
+            assertNull(s.apiUrl)
+            assertTrue(BugCapsule.isRecording)
+            BugCapsule.reportError(IllegalStateException("still fine"))
+            BugCapsule.flushUploads().get(5, TimeUnit.SECONDS)
+            val lines = ShadowLog.getLogsForTag(SdkLog.TAG).filter { it.msg.contains("backend config refused") }
+            assertEquals(logs(), 1, lines.size)
+            assertEquals(android.util.Log.ERROR, lines.single().type)
+            BugCapsule.resetForTest()
+        }
+        assertEquals(0, seen.size)
+    }
+
+    @Test
     fun withoutTokenOrBackendTheStatusIsNotConfigured() {
         BugCapsule.init(app, BugCapsuleConfig.builder().mode(CaptureMode.QA).build())
         val s = BugCapsule.status()

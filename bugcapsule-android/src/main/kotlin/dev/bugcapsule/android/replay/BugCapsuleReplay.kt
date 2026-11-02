@@ -18,6 +18,7 @@ import dev.bugcapsule.android.emergency.EmergencyDecision
 import dev.bugcapsule.android.emergency.EmergencyDecisionScript
 import dev.bugcapsule.android.internal.SdkLog
 import dev.bugcapsule.android.storage.EarlyRestore
+import dev.bugcapsule.android.storage.StoragePolicy
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -78,10 +79,19 @@ object BugCapsuleReplay {
      * Fetches the capsule and settings from [url] and restores checkpointed
      * storage (SharedPreferences, Preferences DataStore) into the target app.
      * Must run before `Application.onCreate` (the runner's `onCreate`).
+     * Only storage the capsule's capture-time policy (manifest
+     * `storagePolicy`) allowed is written.
      * Returns false when replay was refused or could not start (a report was sent).
      */
     @JvmStatic
-    fun arm(instrumentation: Instrumentation, url: String, sink: StatusSink?): Boolean {
+    fun arm(instrumentation: Instrumentation, url: String, sink: StatusSink?): Boolean = arm(instrumentation, url, null, sink)
+
+    /**
+     * [arm], restoring only storage that the app's current [storagePolicy]
+     * (`StoragePolicy.of(integrations)`) allows as well.
+     */
+    @JvmStatic
+    fun arm(instrumentation: Instrumentation, url: String, storagePolicy: StoragePolicy?, sink: StatusSink?): Boolean {
         val context = instrumentation.targetContext
         val channel = try {
             ReplayChannel(url)
@@ -117,7 +127,12 @@ object BugCapsuleReplay {
         val settings = result.second as ReplaySettings
         val divergences = ArrayList<Divergence>()
         try {
-            EarlyRestore.restore(context, capsule.checkpoint.data) { type, detail -> divergences.add(Divergence(type, detail)) }
+            EarlyRestore.restore(
+                context,
+                capsule.checkpoint.data,
+                StoragePolicy.fromJson(capsule.manifest.storagePolicy),
+                storagePolicy,
+            ) { type, detail -> divergences.add(Divergence(type, detail)) }
         } catch (e: Throwable) {
             divergences.add(Divergence("restore.storage", e.toString()))
         }

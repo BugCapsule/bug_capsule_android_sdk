@@ -13,6 +13,7 @@ import dev.bugcapsule.android.core.FixtureStore
 import dev.bugcapsule.android.core.IdleCompressor
 import dev.bugcapsule.android.core.J
 import dev.bugcapsule.android.core.Redactor
+import dev.bugcapsule.android.core.ReplayEvidence
 import dev.bugcapsule.android.core.ReplayOutcome
 import dev.bugcapsule.android.core.ReplayReport
 import dev.bugcapsule.android.core.ReplaySettings
@@ -128,6 +129,21 @@ class ReplayEngine(
     /** Messages for the report (e.g. why the replay stopped early). */
     @Volatile
     var message: String? = null
+
+    private val passedChecks = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** `BugCapsule.check(assertionId, true)` ran during this replay (verdict v2 evidence). */
+    fun checkPassed(assertionId: String) {
+        passedChecks.add(assertionId)
+    }
+
+    /**
+     * Evaluates the app's `BugCapsule.expect` postconditions; set by the
+     * runtime. Called once, when the report is built after replay settled
+     * without the failure.
+     */
+    @Volatile
+    var postconditions: (() -> Map<String, Boolean>)? = null
 
     private fun msSince(ns: Long) = (nanoTime() - ns) / 1_000_000
 
@@ -398,6 +414,14 @@ class ReplayEngine(
             seen != null -> ReplayOutcome.REPRODUCED
             else -> ReplayOutcome.NOT_REPRODUCED
         }
+        // Verdict v2 positive evidence; a reproduction (or anything but a clean run) carries none.
+        val clean = outcome == ReplayOutcome.NOT_REPRODUCED && expected != null
+        val evidence = ReplayEvidence(
+            assertionPassed = if (clean && expected!!.kind == FailureKind.ASSERTION && expected.assertionId in passedChecks) true else null,
+            postconditions = if (clean) evaluatePostconditions() else emptyMap(),
+            failurePointPassed = clean && expectedInputs != null && dispatched.get() == expectedInputs &&
+                elapsed() >= expected!!.t - base,
+        )
         return ReplayReport(
             outcome = outcome,
             attempt = settings.attempt,
@@ -418,7 +442,22 @@ class ReplayEngine(
             runtime = "android",
             reasonCode = judgment?.reasonCode,
             death = died?.toJson(),
+            evidence = evidence,
         )
+    }
+
+    private var postconditionResults: Map<String, Boolean>? = null
+
+    /** Evaluated once per report: a later [buildReport] reuses the results. */
+    private fun evaluatePostconditions(): Map<String, Boolean> {
+        postconditionResults?.let { return it }
+        val results = try {
+            postconditions?.invoke() ?: emptyMap()
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+        postconditionResults = results
+        return results
     }
 
     private fun dispatch(event: CapsuleEvent, driver: ReplayDriver, screen: ScreenInfo?) {
