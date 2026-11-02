@@ -1566,6 +1566,7 @@ internal class Runtime(
             capsule, settings, actions, gitSha, reporter,
             attemptMarker = CrashReplay.markerFile(host.context.noBackupFilesDir),
         )
+        e.postconditions = BugCapsule::evaluatePostconditions
         engine = e
         e.precheck()
         for (d in armed.earlyDivergences) e.diverge(d.type, d.detail)

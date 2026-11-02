@@ -132,6 +132,8 @@ data class ReplayReport(
     val death: Map<String, Any?>? = null,
     /** What this attempt actually ran; null when the app has no patch runtime. */
     val patch: PatchIdentity? = null,
+    /** Positive evidence (verdict v2); null from SDKs that predate it. */
+    val evidence: ReplayEvidence? = null,
 ) {
     fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "outcome" to outcome.wire,
@@ -155,6 +157,7 @@ data class ReplayReport(
         if (reasonCode != null) it["reasonCode"] = reasonCode
         if (death != null) it["death"] = death
         if (patch != null) it["patch"] = patch.toJson()
+        if (evidence != null) it["evidence"] = evidence.toJson()
     }
 
     companion object {
@@ -180,6 +183,50 @@ data class ReplayReport(
             reasonCode = J.str(j["reasonCode"]),
             death = J.obj(j["death"]),
             patch = J.obj(j["patch"])?.let { PatchIdentity.fromJson(it) },
+            evidence = J.obj(j["evidence"])?.let { ReplayEvidence.fromJson(it) },
+        )
+    }
+}
+
+/** How strongly a clean attempt shows the failing path ran and now behaves (verdict v2). */
+enum class EvidenceLevel { NONE, WEAK, STRONG }
+
+/** What a v2 SDK observed beyond "the failure did not fire" (Dart `ReplayEvidence`). */
+data class ReplayEvidence(
+    /**
+     * The capsule's failure assertion was evaluated during replay and held
+     * (`BugCapsule.check`); null when it was never evaluated or the failure
+     * is not an assertion.
+     */
+    val assertionPassed: Boolean? = null,
+    /** `BugCapsule.expect` postconditions, evaluated after replay settled. */
+    val postconditions: Map<String, Boolean> = emptyMap(),
+    /** Every recorded input was dispatched and replay settled past the recorded failure point. */
+    val failurePointPassed: Boolean = false,
+) {
+    /** Postconditions that did not hold. */
+    val failedPostconditions: List<String> get() = postconditions.filterValues { !it }.keys.toList()
+
+    val level: EvidenceLevel
+        get() = when {
+            failedPostconditions.isNotEmpty() -> EvidenceLevel.NONE
+            assertionPassed == true || postconditions.isNotEmpty() -> EvidenceLevel.STRONG
+            failurePointPassed -> EvidenceLevel.WEAK
+            else -> EvidenceLevel.NONE
+        }
+
+    fun toJson(): Map<String, Any?> = linkedMapOf<String, Any?>().also {
+        if (assertionPassed != null) it["assertionPassed"] = assertionPassed
+        if (postconditions.isNotEmpty()) it["postconditions"] = LinkedHashMap(postconditions)
+        it["failurePointPassed"] = failurePointPassed
+    }
+
+    companion object {
+        @JvmStatic
+        fun fromJson(j: Map<String, Any?>) = ReplayEvidence(
+            assertionPassed = j["assertionPassed"] as? Boolean,
+            postconditions = (J.obj(j["postconditions"]) ?: emptyMap()).entries.associate { (k, v) -> k to (v == true) },
+            failurePointPassed = j["failurePointPassed"] == true,
         )
     }
 }
