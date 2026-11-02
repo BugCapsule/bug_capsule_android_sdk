@@ -176,6 +176,32 @@ class ArmingTest {
     }
 
     @Test
+    fun checkAndExpectFeedTheReplayEvidence() {
+        debuggable(true)
+        capsuleBytes = capsuleWith(emptyMap())
+        assertTrue(BugCapsuleReplay.arm(instrumentation, url, null))
+        BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        val engine = BugCapsuleReplay.awaitEngine(1000)!!
+        BugCapsule.check("other.assertion", true)
+        BugCapsule.check("boom", true) // The capsule's assertion (TestCapsules.failure).
+        BugCapsule.expect("cart.total_positive") { true }
+        BugCapsule.expect("throws") { error("broken") }
+        val evidence = engine.buildReport().evidence!!
+        assertEquals(true, evidence.assertionPassed)
+        assertEquals(mapOf("cart.total_positive" to true, "throws" to false), evidence.postconditions)
+        assertEquals(dev.bugcapsule.android.core.EvidenceLevel.NONE, evidence.level)
+    }
+
+    @Test
+    fun expectOutsideReplayDoesNothing() {
+        BugCapsule.init(app, BugCapsuleConfig.builder().build())
+        var calls = 0
+        BugCapsule.expect("never") { calls++; true }
+        BugCapsule.check("boom", true)
+        assertEquals(0, calls)
+    }
+
+    @Test
     fun seededRandomAndVirtualClockComeFromTheCapsule() {
         debuggable(true)
         capsuleBytes = capsuleWith(emptyMap())

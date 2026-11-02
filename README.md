@@ -11,7 +11,7 @@ links each error to the capsule that replays it.
 QA hits a bug      ─► capsule captured, redacted on the device, uploaded
 bugcapsule run     ─► REPRODUCED 3/3   (instrumentation test on an emulator)
 fix the code
-bugcapsule verify  ─► FIXED 3/3
+bugcapsule verify  ─► FIXED 8/8   (after the capsule's build reproduced 3/3)
 bugcapsule regress ─► runs in CI from now on
 ```
 
@@ -397,7 +397,7 @@ Only `applicationId` is required. All keys:
 bugcapsule list                      # capsules in your project
 bugcapsule inspect <id>              # failure, eligibility, network, timeline
 bugcapsule run <id> -n 3             # builds the capsule's commit and replays it on the emulator
-bugcapsule verify <id> -n 3          # builds your working tree; FIXED when the bug is gone
+bugcapsule verify <id> -n 8          # builds your working tree; FIXED when the bug is gone
 bugcapsule regress add <id>          # keep it as a regression test
 bugcapsule regress run               # in CI: exit 1 when a regression fails
 ```
@@ -409,6 +409,28 @@ running it boots the `avd` headless. Unlock the device once after boot.
 **Replay is off in production.** It can only be started from the
 instrumentation runner, which ships in the androidTest APK only, and only for
 a debuggable build. There is no intent, deep link, URL or push into replay.
+
+**What FIXED means (verdict v2).** A run where the failure simply did not
+happen is not enough:
+
+- the capsule's own build (the baseline) must reproduce the failure in every
+  one of at least 3 attempts; a baseline that reproduces only sometimes is
+  FLAKY, and no baseline is INCONCLUSIVE;
+- the fixed build needs enough clean attempts for that baseline (3/3 → 8,
+  5/5 → 6, 10/10 → 5);
+- every clean attempt needs positive evidence that the failing path ran:
+  `BugCapsule.check(id, condition)` passed for the capsule's assertion, or
+  the postconditions you register with `BugCapsule.expect(name) { … }` held
+  (evaluated after replay settles; no-op outside replay). If replay only got
+  past the recorded failure point, the result is FIXED_QUALIFIED (exit 4); a
+  postcondition that fails is STILL_FAILING;
+- a partial capsule is at most FIXED_QUALIFIED, an ineligible one
+  INCONCLUSIVE, and a replay that let live traffic through is UNSAFE (exit 5).
+
+```kotlin
+BugCapsule.check("cart.total", cart.total >= 0)          // the capsule's assertion
+BugCapsule.expect("cart.total_positive") { cart.total > 0 }
+```
 
 See the [CLI reference](https://docs.bugcapsule.com/cli.html) and
 [how verdicts work](https://docs.bugcapsule.com/verdicts.html).
