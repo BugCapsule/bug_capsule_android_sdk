@@ -51,9 +51,14 @@ jobs:
           api-level: ${{ matrix.api-level }}
           arch: x86_64
           target: google_apis
-          disable-animations: true
+          # The runner's own animation settings ran before the API 29
+          # settings service was up ("Broken pipe") and failed the job before
+          # any test; scripts/emulator_ready.sh waits for boot and retries.
+          disable-animations: false
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
-          script: ./gradlew :bugcapsule-patch:connectedDebugAndroidTest :demo:connectedDebugAndroidTest --continue
+          script: |
+            sh scripts/emulator_ready.sh
+            ./gradlew :bugcapsule-patch:connectedDebugAndroidTest :demo:connectedDebugAndroidTest --continue
       - name: Report test, failure and skip counts
         if: always()
         run: python3 scripts/instrumentation_summary.py bugcapsule-patch examples/demo
