@@ -171,7 +171,9 @@ BugCapsuleConfig.builder()
 
 The explicit backend wins when both are set (the SDK logs that the token was
 ignored). The ingest key is public like the token. **Never put a `bcs_…` secret
-key in an app.**
+key in an app.** The SDK refuses a `bcs_` key, and plain `http://` to anything
+but `localhost`, `127.x.x.x`, `[::1]` or `10.0.2.2`; a refused backend leaves
+the app running without uploads.
 
 On an emulator, a BugCapsule server running on your own computer is
 `10.0.2.2`, not `127.0.0.1`.
