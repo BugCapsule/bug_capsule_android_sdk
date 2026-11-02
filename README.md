@@ -135,6 +135,13 @@ come from the package info.
 - **It never breaks your app.** `init` never throws and never blocks on the
   network. A token that can't be used logs one line under the `BugCapsule` tag
   saying what to fix, and the app runs without uploads.
+- **It does no disk I/O on the calling thread.** The SDK's files (cached
+  project settings, crash journals, the launch snapshot of allowlisted
+  storage) are read on its own thread, so `init` returns right away and
+  `BugCapsule.isRecording` turns true shortly after. Events, logs and scope
+  changes made in between are kept in memory (up to 256 of each) and applied
+  once it is ready; `captureException` returns `null` then, and its event is
+  sent once ready.
 
 ### 3. Check the connection
 
@@ -659,7 +666,10 @@ Platform limits in this release:
 - Read the [production checklist](https://docs.bugcapsule.com/production.html).
 
 Data waits in a bounded outbox (10 capsules / 10 MiB / 7 days) and is retried
-with backoff. Storage and network errors never reach your app. Details:
+with backoff. In memory, the recorder keeps at most `maxRetainedBytes` of
+events (default 8 MiB): over it the oldest HTTP bodies and interaction
+payloads are dropped first, then the oldest events, and capsules list
+`capture.truncated` in their eligibility. Storage and network errors never reach your app. Details:
 [docs/how-it-works.md](docs/how-it-works.md#storage-and-uploads).
 
 ## Limitations

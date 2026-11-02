@@ -53,6 +53,26 @@ coroutine exceptions reach the default handler).
 The session anchor (event `t = 0`) is the first drawn frame of the first
 activity; `t` uses `SystemClock.elapsedRealtime()`.
 
+**Startup.** `init` does no disk I/O on the calling thread. It sets the
+integrations up and registers the lifecycle, screen-tracing and crash
+callbacks there; then the SDK's thread reads the cached remote config,
+prepares the crash journal, takes the launch snapshot (SharedPreferences,
+DataStore) and opens the monitoring files. Until that is done, recorded
+events wait in a ring of 256 (the oldest go first) and monitoring calls
+(`configureScope`, `addBreadcrumb`, `captureException`, `captureMessage`,
+sessions) in a queue of 256; both are applied in order once it is done.
+Failures raised meanwhile are captured right after it; an uncaught crash
+waits up to 2 s for it. The launch checkpoint keeps the time `init` was
+called. Capture, capsule writes and uploads never start before it finishes,
+and a failure there leaves the app without capture. Transactions started
+before it are not traced.
+
+**Memory.** The recorder keeps at most `maxEvents` events, `windowMs` of
+time and `maxRetainedBytes` (8 MiB) of estimated payload. Over the byte
+budget the oldest HTTP bodies and interaction payloads are dropped first
+(request keys stay, so replay still matches), then the oldest events; the
+capsule's eligibility lists `capture.truncated` (not blocking).
+
 More helpers: `BugCapsule.log("legacy cache migrated", level = "warn")`,
 `BugCapsule.reportState("cart")` (a diagnostic `state` event),
 `BugCapsule.flushUploads()`, `BugCapsule.refreshRemoteConfig()`.

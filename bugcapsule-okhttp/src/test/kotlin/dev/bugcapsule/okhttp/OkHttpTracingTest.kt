@@ -69,6 +69,8 @@ class OkHttpTracingTest {
             .beforeSend { e, _ -> e.also { events.add(it.payload) } }
             .build()
         BugCapsule.init(ApplicationProvider.getApplicationContext<Application>(), config, listOf(okHttp))
+        // Monitoring starts once init's background preparation is done (queued before this).
+        BugCapsule.flushUploads().get(10, TimeUnit.SECONDS)
     }
 
     private fun get(server: MockWebServer, path: String, baggage: String? = null): Int {

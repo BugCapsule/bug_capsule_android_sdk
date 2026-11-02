@@ -90,6 +90,13 @@ class BugCapsuleConfig private constructor(b: Builder) {
     val windowMs: Long = b.windowMs
     val maxEvents: Int = b.maxEvents
 
+    /**
+     * Estimated bytes of recorded events kept in memory (default 8 MiB). Over
+     * it the oldest HTTP bodies and interaction payloads are dropped first,
+     * then the oldest events; capsules then list `capture.truncated`.
+     */
+    val maxRetainedBytes: Long = b.maxRetainedBytes
+
     /** Maximum fraction of production sessions that record (remote `sampleRate` can lower it, never raise it). */
     val productionSampleRate: Double = b.productionSampleRate
     val autoCaptureOnFailure: Boolean = b.autoCaptureOnFailure
@@ -211,6 +218,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         internal var checkpointIntervalMs = 30_000L
         internal var windowMs = 5 * 60_000L
         internal var maxEvents = 20_000
+        internal var maxRetainedBytes = dev.bugcapsule.android.core.DEFAULT_MAX_RETAINED_BYTES
         internal var productionSampleRate = 0.1
         internal var autoCaptureOnFailure = true
         internal var maxCapsulesPerSession = 3
@@ -265,6 +273,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
             gitDirty = c.gitDirty; stateSchemaVersion = c.stateSchemaVersion
             patchBinding = c.patchBinding
             checkpointIntervalMs = c.checkpointIntervalMs; windowMs = c.windowMs; maxEvents = c.maxEvents
+            maxRetainedBytes = c.maxRetainedBytes
             productionSampleRate = c.productionSampleRate; autoCaptureOnFailure = c.autoCaptureOnFailure
             maxCapsulesPerSession = c.maxCapsulesPerSession; captureNetworkBodies = c.captureNetworkBodies
             maxBodyBytes = c.maxBodyBytes; redactKeys += c.redactKeys; redactHeaders += c.redactHeaders
@@ -306,6 +315,7 @@ class BugCapsuleConfig private constructor(b: Builder) {
         fun checkpointIntervalMs(v: Long) = apply { checkpointIntervalMs = v.coerceAtLeast(1000) }
         fun windowMs(v: Long) = apply { windowMs = v }
         fun maxEvents(v: Int) = apply { maxEvents = v }
+        fun maxRetainedBytes(v: Long) = apply { maxRetainedBytes = v.coerceAtLeast(64L * 1024) }
         fun productionSampleRate(v: Double) = apply { productionSampleRate = v }
         fun autoCaptureOnFailure(v: Boolean) = apply { autoCaptureOnFailure = v }
         fun maxCapsulesPerSession(v: Int) = apply { maxCapsulesPerSession = v }
