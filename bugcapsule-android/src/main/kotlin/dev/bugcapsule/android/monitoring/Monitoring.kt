@@ -747,6 +747,14 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
         }
     }
 
+    /** Deletes queued envelopes (local data cleared). */
+    fun purgeQueued() {
+        try {
+            outbox?.purge()
+        } catch (_: Throwable) {
+        }
+    }
+
     /** Queued envelope files (tests, diagnostics). */
     fun queuedEnvelopes(): List<File> = outbox?.entries()?.map { it.file } ?: emptyList()
 

@@ -78,6 +78,10 @@ object BugCapsule {
     /** Set by [init] even when setup fails, so [status] can say why. */
     @Volatile
     private var connection: ResolvedConnection? = null
+
+    /** A [setCollectionEnabled] call made before [init]. */
+    @Volatile
+    private var pendingCollection: Boolean? = null
     private val actions = ActionRegistry()
     private val fallbackRandom = Random()
 
@@ -104,6 +108,7 @@ object BugCapsule {
             connection = conn
             val rt = Runtime(Host(application), resolved, integrations, testOverrides, actions, conn)
             runtime = rt
+            pendingCollection?.let { rt.setCollectionEnabled(it) }
             rt.start()
         } catch (e: Throwable) {
             SdkLog.w("BugCapsule setup failed; the app runs without capture: $e")
@@ -369,6 +374,47 @@ object BugCapsule {
     /** Saved capsule files, newest first (at most `maxSavedCaptures`). */
     @JvmStatic
     fun savedCaptures(): List<File> = runtime?.savedCaptures() ?: emptyList()
+
+    // ------------------------------------------------------ local data
+
+    /**
+     * Consent switch. False stops capture and monitoring now, uploads
+     * nothing more, and deletes what was queued or saved on the device (as
+     * [clearLocalData]). True turns collection back on; when it was off in
+     * this process, capture and monitoring start at the next launch. The
+     * choice is persisted and wins over [BugCapsuleConfig.collectionEnabled]
+     * at every later launch. Callable before [init]. Emergency guards are not
+     * affected.
+     */
+    @JvmStatic
+    fun setCollectionEnabled(enabled: Boolean) {
+        val rt = runtime
+        if (rt == null) {
+            pendingCollection = enabled
+            return
+        }
+        try {
+            rt.setCollectionEnabled(enabled)
+        } catch (e: Throwable) {
+            SdkLog.w("setCollectionEnabled failed: $e")
+        }
+    }
+
+    /**
+     * Deletes what BugCapsule stored on the device, in the background:
+     * queued and saved capsules, queued monitoring events, crash journals and
+     * native crash records of earlier processes, the cached project settings
+     * and the monitoring scope, session and install id. The emergency policy
+     * cache is kept, so feature guards keep working offline, and so is the
+     * consent choice. The running session's recording stays in memory (and
+     * its crash journal): call [setCollectionEnabled] with false first to drop
+     * it too. Does nothing before [init].
+     */
+    @JvmStatic
+    fun clearLocalData(): Future<*> {
+        val rt = runtime ?: return FutureTask<CaptureResult?> { null }.apply { run() }
+        return rt.submit { rt.clearLocalDataNow() }
+    }
 
     /** Fetches the remote capture config now (it is otherwise refreshed after its TTL and on foreground). */
     @JvmStatic
@@ -639,6 +685,7 @@ object BugCapsule {
         runtime?.dispose()
         runtime = null
         connection = null
+        pendingCollection = null
         actions.clear()
         postconditions.clear()
         emergency.resetForTest()

@@ -576,6 +576,18 @@ never captured).
 - Crash journals (`journal/<pid>/`) are already-redacted capsule data with
   the same protection as saved capsules (`noBackupFilesDir`, never uploaded
   as they are); see [Crash capsules](#crash-capsules).
+- Saved capsules are deleted after `savedCaptureMaxAgeMs` (7 days), on start
+  and whenever a capsule is saved.
+- Consent: `setCollectionEnabled(false)` stops capture, monitoring, config
+  fetches and uploads, and runs `clearLocalData()`. The choice is written to
+  `collection` in the SDK's storage and read on the SDK's thread at every
+  start (it wins over `collectionEnabled` in the config); turning it back on
+  applies at the next launch. `clearLocalData()` deletes `outbox/`,
+  `captures/`, `monitoring/envelopes/`, other processes' `journal/<pid>/`,
+  `native/*.crash`, `remote_config.json` and `monitoring/{scope.json,
+  session.json,install_id}`; it keeps `emergency/` (offline guards),
+  `collection`, `monitoring/exit_info.json` (so exits are not reported twice)
+  and the live journal of the running process.
 - The kill switch stops recording and deletes queued and saved capsules.
   Remote config can also disable body capture (also stripping buffered
   bodies) and add redaction keys (re-redacting the buffer).
