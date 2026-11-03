@@ -1,3 +1,10 @@
+# 0.4.1-beta.7 — 2026-11-03
+
+- Ship signed emergency guards, update providers and the registered patch runtime.
+- Add Verdict v2 evidence, production privacy defaults, credential redaction and app-enforced storage/configuration policy.
+- Add persisted consent, local data deletion and saved-capture expiry.
+- Prepare captures off the main thread and bound recorder memory.
+
 # Changelog
 
 ## 0.4.1-beta.7 — 2026-11-01
