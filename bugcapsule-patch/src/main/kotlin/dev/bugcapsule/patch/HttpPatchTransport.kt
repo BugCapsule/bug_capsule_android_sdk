@@ -13,7 +13,18 @@ import java.util.TimerTask
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Refusal from the delivery endpoint, or a response outside its bounds. */
-class PatchHttpException(val reason: String, val status: Int? = null) : IOException("$reason${status?.let { ", HTTP $it" } ?: ""}")
+class PatchHttpException(
+    val reason: String,
+    val status: Int? = null,
+    /** From `Retry-After`, in seconds, when the server sent one. */
+    val retryAfterSeconds: Long? = null,
+    /**
+     * A keyring delivered with a `503 channel_invalidated`. Untrusted bytes:
+     * the runtime verifies it against the pinned roots before anything changes.
+     */
+    val keyringDocument: ByteArray? = null,
+    val keyringSignature: ByteArray? = null,
+) : IOException("$reason${status?.let { ", HTTP $it" } ?: ""}")
 
 /**
  * [PatchTransport] over the BugCapsule delivery API (`/v1/apps/:id/patches`).
@@ -82,12 +93,12 @@ class HttpPatchTransport(
         }
     }
 
-    private fun read(c: HttpURLConnection, max: Int): ByteArray {
+    private fun read(c: HttpURLConnection, max: Int, error: Boolean = false): ByteArray {
         // contentLengthLong needs API 24; a length past Int also goes through here.
         val declared = c.getHeaderField("Content-Length")?.toLongOrNull()
         if (declared != null && declared > max) throw PatchHttpException("response_too_large", c.responseCode)
         val out = ByteArrayOutputStream(minOf(max, 64 * 1024))
-        c.inputStream.use { input ->
+        (if (error) c.errorStream ?: return ByteArray(0) else c.inputStream).use { input ->
             val buf = ByteArray(16 * 1024)
             while (true) {
                 val n = input.read(buf)
@@ -129,9 +140,38 @@ class HttpPatchTransport(
                         keyring?.let { decode(it.getString("signature")) },
                     )
                 }
+                503 -> throw unavailable(c)
                 else -> throw refused(status)
             }
         }
+    }
+
+    /**
+     * A 503 may be `channel_invalidated`: the signed channel is withheld while
+     * it is republished, but the root-signed keyring still travels with it.
+     * The body is read under the channel bound; anything unexpected is a plain
+     * `http_error`, and a malformed keyring is dropped rather than trusted.
+     */
+    private fun unavailable(c: HttpURLConnection): PatchHttpException {
+        val retry = c.getHeaderField("Retry-After")?.toLongOrNull()?.takeIf { it >= 0 }?.coerceAtMost(86_400)
+        val body = read(c, MAX_CHANNEL_BYTES, error = true)
+        val j = try {
+            JSONObject(String(body, Charsets.UTF_8))
+        } catch (_: org.json.JSONException) {
+            null
+        }
+        if (j == null || j.optString("reason") != "channel_invalidated") return PatchHttpException("http_error", 503, retry)
+        val k = j.optJSONObject("keyring")
+        val doc = k?.opt("document") as? String
+        val sig = k?.opt("signature") as? String
+        // android.util.Base64 skips characters outside the alphabet, so check strictly first.
+        val strict = { v: String? -> v != null && v.isNotEmpty() && STRICT_BASE64.matches(v) }
+        val pair = try {
+            if (strict(doc) && strict(sig)) Base64.decode(doc, Base64.DEFAULT) to Base64.decode(sig, Base64.DEFAULT) else null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        return PatchHttpException("channel_invalidated", 503, retry, pair?.first, pair?.second)
     }
 
     private fun decode(s: String): ByteArray = try {
@@ -186,6 +226,7 @@ class HttpPatchTransport(
         const val MAX_CHANNEL_BYTES = 64 shl 10
         const val MAX_RECEIPTS = 100
         private val DIGEST = Regex("^sha256:[0-9a-f]{64}$")
+        private val STRICT_BASE64 = Regex("^[A-Za-z0-9+/]+={0,2}$")
         private val LOOPBACK = setOf("localhost", "127.0.0.1", "::1", "10.0.2.2")
 
         /** An event outside this list stays local: one unknown name would refuse the whole batch. */

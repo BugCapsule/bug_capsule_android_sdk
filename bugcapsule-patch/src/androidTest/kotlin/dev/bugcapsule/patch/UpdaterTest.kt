@@ -55,6 +55,90 @@ class UpdaterTest {
 
     private fun dir() = File(context.cacheDir, "u${System.nanoTime()}").path
 
+    // 503 channel_invalidated with a keyring (P0-3)
+    private val rings = JSONObject(InstrumentationRegistry.getInstrumentation().context.assets.open("keyrings.json").bufferedReader().readText())
+    private fun ring(name: String): Pair<ByteArray, ByteArray> {
+        val a = rings.getJSONArray("keyrings")
+        val k = (0 until a.length()).map { a.getJSONObject(it) }.first { it.getString("name") == name }
+        return Base64.decode(k.getString("document"), Base64.DEFAULT) to Base64.decode(k.getString("signature"), Base64.DEFAULT)
+    }
+    private fun invalidated(name: String?): PatchHttpException {
+        val r = name?.let { ring(it) }
+        return PatchHttpException("channel_invalidated", 503, 30, r?.first, r?.second)
+    }
+    private val signerDoc = Base64.decode(rings.getJSONObject("signerChannel").getString("document"), Base64.DEFAULT)
+    private val signerSig = Base64.decode(rings.getJSONObject("signerChannel").getString("signature"), Base64.DEFAULT)
+
+    private inner class Throwing503(val artifact: ByteArray) : PatchTransport {
+        var next: SignedChannel? = null
+        var error: PatchHttpException? = null
+        var downloads = 0
+        val etags = mutableListOf<String?>()
+        override fun fetchChannel(etag: String?): SignedChannel? {
+            etags.add(etag)
+            error?.let { throw it }
+            return next
+        }
+        override fun fetchArtifact(digest: String): ByteArray {
+            downloads++
+            return artifact
+        }
+        override fun postReceipts(batch: JSONObject) {}
+    }
+
+    @Test
+    fun invalidatedAppliesOnlyVerifiedKeyringsNeverStagesAndRevocationSurvivesRestart() {
+        val patch = open(dir())
+        val net = Throwing503(bundle("valid"))
+        val (ad, asig) = ring("authorize")
+        net.next = SignedChannel(signerDoc, signerSig, "a", ad, asig)
+        val updater = PatchUpdater(patch, net)
+        assertEquals(PatchUpdateState.RESTART_REQUIRED, updater.checkForUpdate().state)
+        val staged = patch.status().opt("pending")
+        for ((name, code) in listOf("forged" to "bad_signature", "other project" to "wrong_target")) {
+            net.error = invalidated(name)
+            val r = updater.checkForUpdate()
+            assertEquals(name, PatchUpdateState.FAILED, r.state)
+            assertEquals(name, "channel_invalidated; keyring_rejected:$code", r.reason)
+            assertEquals(30L, r.retryAfterSeconds)
+        }
+        net.error = invalidated("revoke")
+        assertEquals("channel_invalidated", updater.checkForUpdate().reason)
+        assertEquals("a 503 never downloads", 1, net.downloads)
+        assertEquals("a 503 never changes what is staged", staged, patch.status().opt("pending"))
+        net.error = invalidated("stale")
+        assertEquals("channel_invalidated; keyring_rejected:stale", updater.checkForUpdate().reason)
+        patch.close()
+
+        val fresh = dir()
+        val p2 = open(fresh)
+        val net2 = Throwing503(bundle("valid"))
+        val u2 = PatchUpdater(p2, net2)
+        net2.error = invalidated("authorize")
+        assertEquals("channel_invalidated", u2.checkForUpdate().reason)
+        net2.error = invalidated("revoke")
+        assertEquals("channel_invalidated", u2.checkForUpdate().reason)
+        p2.close()
+        val restarted = open(fresh)
+        val e = org.junit.Assert.assertThrows(PatchException::class.java) { restarted.applyChannel(signerDoc, signerSig) }
+        assertEquals("untrusted_key", e.code)
+        assertTrue("refused as revoked after restart: ${e.message}", e.message!!.contains("revoked"))
+        restarted.close()
+    }
+
+    @Test
+    fun nextCheckAfterA503RetriesTheChannel() {
+        val patch = open(dir())
+        val net = Throwing503(bundle("valid")).apply { error = invalidated(null) }
+        val updater = PatchUpdater(patch, net)
+        assertEquals(PatchUpdateState.FAILED, updater.checkForUpdate().state)
+        net.error = null
+        net.next = channel("valid")
+        assertEquals(PatchUpdateState.RESTART_REQUIRED, updater.checkForUpdate().state)
+        assertEquals("no ETag recorded from a 503", listOf<String?>(null, null), net.etags)
+        patch.close()
+    }
+
     @Test
     fun downloadsStagesAndKeepsTheRunningGeneration() {
         val d = dir()
