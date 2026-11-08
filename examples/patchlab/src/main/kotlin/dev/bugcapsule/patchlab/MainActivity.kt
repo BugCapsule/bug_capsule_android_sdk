@@ -216,7 +216,10 @@ class MainActivity : ComponentActivity() {
     /** Applies whatever the delivery harness dropped. Takes effect next launch. */
     private fun processInbox(patch: BugCapsulePatch, exchange: File): JSONArray {
         val log = JSONArray()
-        val files = File(exchange, "inbox").listFiles()?.sortedBy { it.name } ?: return log
+        // The app owns its inbox: on Android 11+ a directory created by adb is not
+        // listable by the app, while files pushed into an app-owned one are.
+        val inbox = File(exchange, "inbox").apply { mkdirs() }
+        val files = inbox.listFiles()?.sortedBy { it.name } ?: return log
         for (f in files) {
             try {
                 if (f.name.endsWith(".channel")) {
