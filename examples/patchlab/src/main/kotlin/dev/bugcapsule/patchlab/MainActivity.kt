@@ -220,15 +220,21 @@ class MainActivity : ComponentActivity() {
                     // session), end and send it, then close monitoring.
                     val resumed = awaitResumed()
                     record.put("resumed", resumed)
+                    // Readiness barrier: init prepares asynchronously. flush() returns true
+                    // only once startup preparation finished and the queue is sent; one
+                    // main-thread drain then runs prepare's deferred foreground step, so the
+                    // session this launch opens exists before it is ended.
+                    val ready = resumed && BugCapsule.flush(10_000) && drainMainThread()
+                    record.put("sdkReady", ready)
                     record.put("uncaughtHandler", Thread.getDefaultUncaughtExceptionHandler()?.javaClass?.name ?: JSONObject.NULL)
                     // Acceptance only, telemetry mode only: a one-shot genuine crash (an
                     // uncaught exception on the main thread) while this session is open.
                     // The flag is removed first, so the next launch runs normally and the
                     // SDK's crash handler is what reports it.
                     val crashFlag = File(exchange, "crash-once")
-                    if (!resumed) {
-                        // Fail visibly: the harness rejects a record without a resumed activity.
-                        record.put("lifecycleError", "activity not resumed within 5 s; session left open")
+                    if (!ready) {
+                        // Fail visibly: the harness rejects a record without a ready SDK.
+                        record.put("lifecycleError", if (resumed) "SDK not prepared within 10 s; session left open" else "activity not resumed within 5 s; session left open")
                     } else if (crashFlag.exists()) {
                         check(crashFlag.delete()) { "the one-shot crash flag could not be removed" }
                         runOnUiThread { throw IllegalStateException("PatchLab acceptance: deliberate one-shot crash") }
@@ -263,6 +269,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Runs everything already queued on the main thread; false after 5 s. */
+    private fun drainMainThread(): Boolean {
+        val drained = CountDownLatch(1)
+        runOnUiThread { drained.countDown() }
+        return drained.await(5, TimeUnit.SECONDS)
     }
 
     /** True once the activity is resumed; false after about 5 s. */
