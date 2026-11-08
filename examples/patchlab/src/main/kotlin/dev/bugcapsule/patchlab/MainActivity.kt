@@ -218,21 +218,26 @@ class MainActivity : ComponentActivity() {
                     // process, which must not read as an abnormal session. Wait until
                     // the activity is resumed (so no later foreground opens another
                     // session), end and send it, then close monitoring.
-                    awaitResumed()
+                    val resumed = awaitResumed()
+                    record.put("resumed", resumed)
                     record.put("uncaughtHandler", Thread.getDefaultUncaughtExceptionHandler()?.javaClass?.name ?: JSONObject.NULL)
                     // Acceptance only, telemetry mode only: a one-shot genuine crash (an
                     // uncaught exception on the main thread) while this session is open.
                     // The flag is removed first, so the next launch runs normally and the
                     // SDK's crash handler is what reports it.
                     val crashFlag = File(exchange, "crash-once")
-                    if (crashFlag.exists()) {
+                    if (!resumed) {
+                        // Fail visibly: the harness rejects a record without a resumed activity.
+                        record.put("lifecycleError", "activity not resumed within 5 s; session left open")
+                    } else if (crashFlag.exists()) {
                         check(crashFlag.delete()) { "the one-shot crash flag could not be removed" }
                         runOnUiThread { throw IllegalStateException("PatchLab acceptance: deliberate one-shot crash") }
                         return@Thread
+                    } else {
+                        BugCapsule.endSession()
+                        record.put("sessionFlushed", BugCapsule.flush(10_000))
+                        BugCapsule.close(5_000)
                     }
-                    BugCapsule.endSession()
-                    record.put("sessionFlushed", BugCapsule.flush(10_000))
-                    BugCapsule.close(5_000)
                 }
                 results.appendText(record.toString() + "\n")
             }.start()
@@ -260,7 +265,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun awaitResumed() {
+    /** True once the activity is resumed; false after about 5 s. */
+    private fun awaitResumed(): Boolean {
         repeat(100) {
             val resumed = CountDownLatch(1)
             var state = Lifecycle.State.INITIALIZED
@@ -269,9 +275,10 @@ class MainActivity : ComponentActivity() {
                 resumed.countDown()
             }
             resumed.await(1, TimeUnit.SECONDS)
-            if (state.isAtLeast(Lifecycle.State.RESUMED)) return
+            if (state.isAtLeast(Lifecycle.State.RESUMED)) return true
             Thread.sleep(50)
         }
+        return false
     }
 
     /** Applies whatever the delivery harness dropped. Takes effect next launch. */
