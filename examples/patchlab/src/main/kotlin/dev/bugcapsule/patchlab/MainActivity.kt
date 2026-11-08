@@ -23,7 +23,14 @@ import dev.bugcapsule.patch.compose.PatchSurfaceView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import dev.bugcapsule.android.BugCapsule
+import dev.bugcapsule.android.BugCapsuleConfig
+import dev.bugcapsule.android.core.CaptureMode
 import dev.bugcapsule.android.core.Iso8601
+import dev.bugcapsule.patch.BugCapsulePatchBinding
+import androidx.lifecycle.Lifecycle
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 data class Line(val sku: String, val qty: Int, val unitCents: Long)
 data class Cart(val lines: List<Line>, val couponPercent: Int)
@@ -119,20 +126,37 @@ class MainActivity : ComponentActivity() {
         // this file the lab uses its file inbox. The base build id stays the binary's.
         val remoteFile = File(exchange, "patch-config.json")
         val remote = if (remoteFile.exists()) JSONObject(remoteFile.readText()) else null
-        val patch = BugCapsulePatch.open(
-            PatchConfig(
-                storeDir = File(filesDir, "bcpatch").path,
-                projectId = remote?.getString("projectId") ?: "demo",
-                applicationId = packageName,
-                environment = "staging",
-                distributionProfile = "development",
-                baseBuildId = BuildConfig.BASE_BUILD_ID,
-                installationId = "device-1",
-                trustRoots = listOf(remote?.getString("trustRoot") ?: BuildConfig.TRUST_ANCHOR),
-            ),
-            listOf(coupon),
-            listOf(summarySurface),
+        val patchConfig = PatchConfig(
+            storeDir = File(filesDir, "bcpatch").path,
+            projectId = remote?.getString("projectId") ?: "demo",
+            applicationId = packageName,
+            environment = "staging",
+            distributionProfile = "development",
+            baseBuildId = BuildConfig.BASE_BUILD_ID,
+            installationId = "device-1",
+            trustRoots = listOf(remote?.getString("trustRoot") ?: BuildConfig.TRUST_ANCHOR),
         )
+        // Test-only, opt-in: a local acceptance run turns on BugCapsule monitoring so
+        // the SDK's own release-health sessions carry the running patch identity.
+        // The binding then owns the one runtime of this process.
+        val monitoringFile = File(exchange, "monitoring-config.json")
+        val monitoring = if (monitoringFile.exists()) JSONObject(monitoringFile.readText()) else null
+        val binding = monitoring?.let { BugCapsulePatchBinding(patchConfig, listOf(coupon), listOf(summarySurface)) }
+        if (monitoring != null) {
+            BugCapsule.init(
+                application,
+                BugCapsuleConfig.Builder()
+                    .backend(monitoring.getString("backendUrl"), monitoring.getString("ingestKey"))
+                    .release(monitoring.optString("release", "dev.bugcapsule.patchlab@1.0+1"))
+                    .environment("staging")
+                    .mode(CaptureMode.QA)
+                    .gitSha("patchlab")
+                    .autoCaptureOnFailure(false)
+                    .patchBinding(binding)
+                    .build(),
+            )
+        }
+        val patch = binding?.patch ?: BugCapsulePatch.open(patchConfig, listOf(coupon), listOf(summarySurface))
         val start = System.nanoTime()
         val result = patch.call(coupon, sample)
         val micros = (System.nanoTime() - start) / 1000
@@ -167,6 +191,7 @@ class MainActivity : ComponentActivity() {
             .put("running", before.opt("running"))
             .put("inbox", inbox)
             .put("health", health)
+            .put("monitoring", if (binding == null) "off" else "on")
             .put("status", if (patch.available) patch.status() else JSONObject.NULL)
         val results = File(exchange, "results.jsonl")
         if (remote == null) {
@@ -187,6 +212,28 @@ class MainActivity : ComponentActivity() {
                 }
                 record.put("update", JSONObject().put("state", r.state.name).put("artifactDigest", r.artifactDigest ?: JSONObject.NULL).put("reason", r.reason ?: JSONObject.NULL).put("receiptsSent", sent))
                 record.put("status", patch.status())
+                if (binding != null) {
+                    // Telemetry runs end the release-health session in order and send
+                    // it before the result is recorded: the harness then stops the
+                    // process, which must not read as an abnormal session. Wait until
+                    // the activity is resumed (so no later foreground opens another
+                    // session), end and send it, then close monitoring.
+                    awaitResumed()
+                    record.put("uncaughtHandler", Thread.getDefaultUncaughtExceptionHandler()?.javaClass?.name ?: JSONObject.NULL)
+                    // Acceptance only, telemetry mode only: a one-shot genuine crash (an
+                    // uncaught exception on the main thread) while this session is open.
+                    // The flag is removed first, so the next launch runs normally and the
+                    // SDK's crash handler is what reports it.
+                    val crashFlag = File(exchange, "crash-once")
+                    if (crashFlag.exists()) {
+                        check(crashFlag.delete()) { "the one-shot crash flag could not be removed" }
+                        runOnUiThread { throw IllegalStateException("PatchLab acceptance: deliberate one-shot crash") }
+                        return@Thread
+                    }
+                    BugCapsule.endSession()
+                    record.put("sessionFlushed", BugCapsule.flush(10_000))
+                    BugCapsule.close(5_000)
+                }
                 results.appendText(record.toString() + "\n")
             }.start()
         }
@@ -210,6 +257,20 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun awaitResumed() {
+        repeat(100) {
+            val resumed = CountDownLatch(1)
+            var state = Lifecycle.State.INITIALIZED
+            runOnUiThread {
+                state = lifecycle.currentState
+                resumed.countDown()
+            }
+            resumed.await(1, TimeUnit.SECONDS)
+            if (state.isAtLeast(Lifecycle.State.RESUMED)) return
+            Thread.sleep(50)
         }
     }
 
