@@ -648,17 +648,44 @@ object BugCapsule {
     fun startScreen(name: String, op: String = "ui.load", view: android.view.View? = null): Transaction? =
         runtime?.startScreen(name, op, view)
 
-    /** Sends queued envelopes now, waiting up to [timeoutMs]; true when nothing is left queued. */
+    /**
+     * Sends queued envelopes now, waiting up to [timeoutMs]; true when nothing
+     * is left queued. Right after [init] this first waits (within the same
+     * timeout) for startup preparation: false when it is still running, since
+     * nothing can be known to be sent.
+     */
     @JvmStatic
     @JvmOverloads
-    fun flush(timeoutMs: Long = 5_000): Boolean = runtime?.monitoring?.flush(timeoutMs) ?: true
+    fun flush(timeoutMs: Long = 5_000): Boolean {
+        val rt = runtime ?: return true
+        val start = System.nanoTime()
+        if (!rt.awaitPrepared(timeoutMs)) return false
+        return rt.monitoring?.flush(remainingMs(start, timeoutMs)) ?: true
+    }
 
-    /** Ends the session, flushes and stops monitoring for this process (capsules are unaffected). */
+    /**
+     * Ends the session, flushes and stops monitoring for this process (capsules
+     * are unaffected). Right after [init] it first waits (within [timeoutMs]) for
+     * startup preparation; if that is still running, the stop is applied as soon
+     * as it finishes, so monitoring never starts after a close.
+     */
     @JvmStatic
     @JvmOverloads
     fun close(timeoutMs: Long = 5_000) {
-        runtime?.monitoring?.close(timeoutMs)
+        val rt = runtime ?: return
+        val start = System.nanoTime()
+        if (rt.awaitPrepared(timeoutMs)) {
+            rt.monitoring?.close(remainingMs(start, timeoutMs))
+        } else {
+            rt.withMonitoring {
+                it.sessions?.end()
+                it.disable(purge = false)
+            }
+        }
     }
+
+    private fun remainingMs(startNanos: Long, timeoutMs: Long): Long =
+        (timeoutMs - (System.nanoTime() - startNanos) / 1_000_000).coerceAtLeast(0)
 
     // -------------------------------------------------------------- support
 

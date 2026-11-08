@@ -31,6 +31,40 @@ class SessionsTest {
     )
 
     @Test
+    fun recoveryAfterThisProcessStartedItsSessionLeavesTheLiveSessionAlone() {
+        // The race seen on an emulator: the app reached the foreground (and the
+        // session started and was saved) before startup recovery read the file.
+        val t = patchTracker(patched)
+        t.onForeground()
+        val live = t.currentSid
+        sent.clear()
+
+        t.recoverPrevious(null)
+
+        assertTrue("the live session is not reported as abnormal", sent.isEmpty())
+        assertEquals(live, t.currentSid)
+        t.end()
+        assertEquals("exited", sent.single().first["status"])
+        assertEquals(live, sent.single().first["sid"])
+        // Ended in order: nothing is left for the next launch to recover.
+        sent.clear()
+        patchTracker(patched).recoverPrevious(null)
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test
+    fun recoveryStillReportsThePreviousProcessSessionWhenNoneIsLive() {
+        patchTracker(patched).onForeground()
+        sent.clear()
+
+        val next = patchTracker(patched)
+        next.recoverPrevious(null)
+
+        assertEquals("abnormal", sent.single().first["status"])
+        assertNull(next.currentSid)
+    }
+
+    @Test
     fun everyUpdateCarriesThePatchStartingWithTheFirst() {
         val t = patchTracker(patched)
         t.onForeground()
