@@ -126,6 +126,14 @@ class UpdaterTest {
         restarted.close()
     }
 
+    /** The shipped runtime carries E1 (engine ddced0a): status reports `degraded`. */
+    @Test
+    fun shippedRuntimeReportsDegradedField() {
+        val patch = open(dir())
+        assertEquals(false, patch.status().getBoolean("degraded"))
+        patch.close()
+    }
+
     @Test
     fun nextCheckAfterA503RetriesTheChannel() {
         val patch = open(dir())
