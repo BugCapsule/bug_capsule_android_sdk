@@ -58,6 +58,50 @@ private val coupon = PatchModule<Cart, Priced>(
     fallback = ::bundledCoupon,
 )
 
+/**
+ * The app's own smoke check on the price it is about to show. It recomputes the
+ * expected subtotal from the cart (the product rule: lines of 10+ units get 5%
+ * off, half-even) and checks the discount and total against it, independently
+ * of the patch's code. Returns why the result is not acceptable, or null. A
+ * patched result that fails is never marked healthy, so a signed but wrong
+ * patch stays in probation and the engine rolls it back.
+ *
+ * Amounts are parsed with a bound (at most 9 whole digits) before any
+ * arithmetic, so a huge value is refused instead of overflowing.
+ */
+internal fun smokeFailure(c: Cart, p: Priced): String? {
+    val s = boundedCents(p.subtotal) ?: return "unparseable_amounts"
+    val d = boundedCents(p.discount) ?: return "unparseable_amounts"
+    val t = boundedCents(p.total) ?: return "unparseable_amounts"
+    if (s != expectedSubtotalCents(c)) return "subtotal_mismatch"
+    if (d != halfEven(s * c.couponPercent.coerceIn(0, 50), 100)) return "discount_mismatch"
+    if (t != s - d) return "total_mismatch"
+    if (p.label.isEmpty()) return "empty_label"
+    return null
+}
+
+/** Lab carts are small (quantities and prices well under 10^6), so this cannot overflow. */
+internal fun expectedSubtotalCents(c: Cart): Long = c.lines.sumOf {
+    val gross = it.unitCents * it.qty
+    if (it.qty >= 10) halfEven(gross * 95, 100) else gross
+}
+
+private val AMOUNT = Regex("-?(0|[1-9][0-9]{0,8})\\.[0-9]{2}")
+
+internal fun boundedCents(text: String): Long? {
+    if (!AMOUNT.matches(text)) return null
+    val negative = text.startsWith("-")
+    val (whole, frac) = text.removePrefix("-").split('.')
+    val v = whole.toLong() * 100 + frac.toLong()
+    return if (negative) -v else v
+}
+
+private fun halfEven(n: Long, d: Long): Long {
+    val q = n / d
+    val r = n % d
+    return if (r * 2 > d || (r * 2 == d && q % 2 != 0L)) q + 1 else q
+}
+
 private val sample = Cart(listOf(Line("a", 2, 1999), Line("b", 10, 300)), 20)
 
 private val summarySurface = PatchSurfaceContract(
@@ -94,7 +138,22 @@ class MainActivity : ComponentActivity() {
         val micros = (System.nanoTime() - start) / 1000
         val before = if (patch.available) patch.status() else JSONObject().put("state", "UNAVAILABLE")
         val inbox = if (patch.available) processInbox(patch, exchange) else JSONArray()
-        if (patch.available) patch.markHealthy("first_screen")
+        // Only a patched result that passes the app's own smoke check is healthy.
+        val health = JSONObject().put("checked", false)
+        if (patch.available && result.source.name.lowercase() == "patched") {
+            health.put("checked", true)
+            val why = smokeFailure(sample, result.value)
+            if (why != null) {
+                health.put("ok", false).put("reason", why)
+            } else {
+                health.put("ok", true)
+                try {
+                    health.put("markHealthy", patch.markHealthy("first_screen"))
+                } catch (e: Exception) {
+                    health.put("markHealthyError", e.toString())
+                }
+            }
+        }
         val record = JSONObject()
             .put("at", Iso8601.format(System.currentTimeMillis()))
             .put("mode", if (BuildConfig.DEBUG || Debug.isDebuggerConnected()) "debug" else "release")
@@ -107,6 +166,7 @@ class MainActivity : ComponentActivity() {
             .put("state", before.getString("state"))
             .put("running", before.opt("running"))
             .put("inbox", inbox)
+            .put("health", health)
             .put("status", if (patch.available) patch.status() else JSONObject.NULL)
         val results = File(exchange, "results.jsonl")
         if (remote == null) {
