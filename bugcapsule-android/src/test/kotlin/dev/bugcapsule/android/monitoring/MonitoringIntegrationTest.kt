@@ -91,8 +91,14 @@ class MonitoringIntegrationTest {
         server.shutdown()
     }
 
-    private fun start(configure: BugCapsuleConfig.Builder.() -> Unit = {}) {
-        BugCapsule.testOverrides = BugCapsuleTestOverrides(tmp.root)
+    private fun start(overrides: BugCapsuleTestOverrides = BugCapsuleTestOverrides(tmp.root), configure: BugCapsuleConfig.Builder.() -> Unit = {}) {
+        init(overrides, configure)
+        awaitPrepared()
+        BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
+    }
+
+    private fun init(overrides: BugCapsuleTestOverrides, configure: BugCapsuleConfig.Builder.() -> Unit = {}) {
+        BugCapsule.testOverrides = overrides
         val b = BugCapsuleConfig.builder()
             .mode(CaptureMode.QA)
             .gitSha("abc123")
@@ -100,8 +106,6 @@ class MonitoringIntegrationTest {
             .redactKeys("loyaltyId")
         b.configure()
         BugCapsule.init(app, b.build())
-        awaitPrepared()
-        BugCapsule.refreshRemoteConfig().get(5, TimeUnit.SECONDS)
     }
 
     private fun runtime() = BugCapsule.session as Runtime
@@ -377,6 +381,75 @@ class MonitoringIntegrationTest {
         assertEquals("crashed", session["status"])
         assertEquals("com.shop@0.9.0+8", session["release"])
         assertFalse("records are consumed", java.io.File(root, "123-1761000000000.crash").exists())
+    }
+
+    @Test
+    fun aPreviousCrashedSessionSurvivesTheForegroundArrivingDuringStartupRecovery() {
+        // Seen on an emulator: the activity resumed while startup was recovering
+        // the previous process's session. The live session must not overwrite it.
+        val root = java.io.File(tmp.root, "native").apply { mkdirs() }
+        java.io.File(root, "context.json").writeText("{\"release\":\"com.shop@0.9.0+8\",\"environment\":\"qa\"}")
+        java.io.File(root, "123-1761000000000.crash").writeText(
+            "bugcapsule-native-crash 1\nsignal 6\ncode -6\naddress 0x0\ntid 77\nthread main\ntimestamp 1761000000500\nabi arm64-v8a\n" +
+                "frame 0x7a00001000 0x7a00000000 0x7a00000f00 /data/app/x/lib/arm64/libshop.so checkout_native\nend\n",
+        )
+        java.io.File(tmp.root, "monitoring").mkdirs()
+        java.io.File(tmp.root, "monitoring/session.json").writeText(
+            "{\"sid\":\"b3a1c0de-0000-4000-8000-000000000000\",\"did\":\"i\",\"started\":1761000000000,\"seq\":0," +
+                "\"status\":\"ok\",\"errors\":0,\"timestamp\":1761000000100,\"backgroundSince\":null," +
+                "\"release\":\"com.shop@0.9.0+8\",\"environment\":\"qa\"}",
+        )
+        start(BugCapsuleTestOverrides(tmp.root, beforePreviousRecovery = Runnable { (BugCapsule.session as Runtime).onLifecycle("resumed") }))
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        flushAll()
+
+        val sessions = items("session")
+        val previous = sessions.filter { it["sid"] == "b3a1c0de-0000-4000-8000-000000000000" }
+        assertEquals("the previous process's session is reported, once", 1, previous.size)
+        assertEquals("crashed", previous.single()["status"])
+        assertEquals("com.shop@0.9.0+8", previous.single()["release"])
+        val live = sessions.filter { it["sid"] != "b3a1c0de-0000-4000-8000-000000000000" }
+        assertEquals("this launch starts exactly one session", 1, live.map { it["sid"] }.distinct().size)
+        assertTrue(live.all { it["status"] == "ok" })
+        assertEquals(true, live.first()["init"])
+        BugCapsule.endSession()
+        flushAll()
+        assertEquals("exited", items("session").last()["status"])
+    }
+
+    @Test
+    fun flushAndCloseDuringStartupPreparationAreNotVacuousAndNoSessionOpensAfterClose() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        init(BugCapsuleTestOverrides(tmp.root, beforePrepare = Runnable { gate.await(10, TimeUnit.SECONDS) }))
+        val rt = BugCapsule.session as Runtime
+        rt.onLifecycle("resumed")   // the app is in the foreground while preparation runs
+
+        assertFalse("nothing is known to be sent before preparation", BugCapsule.flush(100))
+        BugCapsule.close(100)       // times out waiting: the stop is applied when preparation finishes
+        gate.countDown()
+        awaitPrepared()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertFalse("monitoring stays off after a close", rt.monitoring?.active ?: false)
+        assertTrue(BugCapsule.flush(5_000))
+        assertTrue("no session started after the close", items("session").isEmpty())
+        assertFalse("nothing is left for the next launch to call abnormal", java.io.File(tmp.root, "monitoring/session.json").exists())
+    }
+
+    @Test
+    fun closeWaitsForStartupPreparationThenStopsMonitoring() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        init(BugCapsuleTestOverrides(tmp.root, beforePrepare = Runnable { gate.await(10, TimeUnit.SECONDS) }))
+        val rt = BugCapsule.session as Runtime
+        rt.onLifecycle("resumed")
+        Thread { Thread.sleep(200); gate.countDown() }.start()
+
+        BugCapsule.close(5_000)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertTrue(rt.awaitPrepared(0))
+        assertFalse(rt.monitoring?.active ?: false)
+        assertFalse(java.io.File(tmp.root, "monitoring/session.json").exists())
     }
 
     @Test

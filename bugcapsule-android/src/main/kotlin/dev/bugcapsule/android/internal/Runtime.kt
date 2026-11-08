@@ -86,6 +86,8 @@ class BugCapsuleTestOverrides @JvmOverloads constructor(
     val monitoringThreads: Boolean = false,
     /** Runs on the executor before capture is prepared (tests hold preparation back with it). */
     val beforePrepare: Runnable? = null,
+    /** Runs on the executor right before the previous process's session is recovered (tests interleave the foreground there). */
+    val beforePreviousRecovery: Runnable? = null,
 )
 
 internal const val SDK_NAME = "bugcapsule-android"
@@ -718,7 +720,11 @@ internal class Runtime(
         if (!config.monitoring) return
         if (cached != null && (!cached.enabled || !cached.monitoringEnabled)) return
         val mon = Monitoring(monitoringEnv)
-        monitoring = mon
+        // Published only after the previous process's session is recovered: a
+        // foreground callback seeing it earlier would start (and save) this
+        // launch's session over the one the previous process left, losing its
+        // crashed / abnormal outcome. Prepare's main-thread step starts the
+        // session for an app that came to the foreground meanwhile.
         val threads = overrides?.monitoringThreads ?: true
 
         // What the previous process left behind: native crash records, the
@@ -734,7 +740,9 @@ internal class Runtime(
         val scopeFile = File(monitoringEnv.dir, "scope.json")
         val watchdogAnrFile = File(monitoringEnv.dir, "watchdog_anr.json")
         val previous = PreviousProcess.collect(native, exits, scopeFile, watchdogAnrFile)
+        overrides?.beforePreviousRecovery?.run()
         mon.sessions?.recoverPrevious(previous.crashedAtMs)
+        monitoring = mon
         if (!previous.isEmpty) {
             // Tombstones and ANR dumps can be large: read them off the calling thread.
             monitoringEnv.submit {

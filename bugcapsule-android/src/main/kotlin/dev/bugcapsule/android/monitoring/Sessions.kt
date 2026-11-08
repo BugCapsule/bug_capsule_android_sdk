@@ -87,15 +87,17 @@ internal class SessionTracker(
      * and environment it ran with. [crashedAtMs]: the previous process ended
      * with a native crash at that time.
      */
-    fun recoverPrevious(crashedAtMs: Long?) {
+    fun recoverPrevious(crashedAtMs: Long?) = synchronized(lock) {
         val previous = try {
             if (file.exists()) J.obj(Json.parse(file.readText()))?.let { State.fromJson(it, release, environment) } else null
         } catch (_: Exception) {
             null
         }
+        // Defense: the saved file is this process's live session, never a previous one.
+        if (previous != null && previous.sid == current?.sid) return@synchronized
         Files.deleteQuietly(file)
-        previous ?: return
-        if (previous.status != "ok") return
+        previous ?: return@synchronized
+        if (previous.status != "ok") return@synchronized
         when {
             crashedAtMs != null -> {
                 previous.status = "crashed"
