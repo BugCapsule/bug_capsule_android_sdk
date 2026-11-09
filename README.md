@@ -65,16 +65,16 @@ Keep them on the same version.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.7")
-    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.7")
-    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.7")
-    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.7")   // if you use Compose
-    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.7")       // optional: native crashes
-    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.7")    // optional: SQLite / Room spans
-    implementation("io.github.bugcapsule:bugcapsule-android-play:0.4.1-beta.7") // optional: Play in-app updates for REQUIRE_UPDATE
-    implementation("io.github.bugcapsule:bugcapsule-patch:0.4.1-beta.7") // optional: registered logic patches
-    implementation("io.github.bugcapsule:bugcapsule-patch-compose:0.4.1-beta.7") // optional: registered surfaces
-    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.7")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.8")
+    implementation("io.github.bugcapsule:bugcapsule-okhttp:0.4.1-beta.8")
+    implementation("io.github.bugcapsule:bugcapsule-navigation:0.4.1-beta.8")
+    implementation("io.github.bugcapsule:bugcapsule-compose:0.4.1-beta.8")   // if you use Compose
+    implementation("io.github.bugcapsule:bugcapsule-ndk:0.4.1-beta.8")       // optional: native crashes
+    implementation("io.github.bugcapsule:bugcapsule-sqlite:0.4.1-beta.8")    // optional: SQLite / Room spans
+    implementation("io.github.bugcapsule:bugcapsule-android-play:0.4.1-beta.8") // optional: Play in-app updates for REQUIRE_UPDATE
+    implementation("io.github.bugcapsule:bugcapsule-patch:0.4.1-beta.8") // optional: registered logic patches
+    implementation("io.github.bugcapsule:bugcapsule-patch-compose:0.4.1-beta.8") // optional: registered surfaces
+    androidTestImplementation("io.github.bugcapsule:bugcapsule-android-replay:0.4.1-beta.8")
 }
 ```
 
@@ -499,7 +499,7 @@ pluginManagement {
 }
 
 // app/build.gradle.kts
-plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.7" }
+plugins { id("io.github.bugcapsule.gradle") version "0.4.1-beta.8" }
 
 bugcapsule {
     url.set("https://api.bugcapsule.com")   // or -PbugcapsuleUrl / BUGCAPSULE_URL
