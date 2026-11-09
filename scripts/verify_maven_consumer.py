@@ -29,7 +29,7 @@ shutil.copytree(root / 'examples/patchlab/src', out / 'app/src')
 }
 ''')
 s = (root / 'examples/patchlab/build.gradle.kts').read_text()
-for old, new in [('alias(libs.plugins.android.application)', 'id("com.android.application")'), ('alias(libs.plugins.kotlin.android)', 'id("org.jetbrains.kotlin.android")'), ('alias(libs.plugins.kotlin.compose)', 'id("org.jetbrains.kotlin.plugin.compose")'), ('libs.compose.bom', '"androidx.compose:compose-bom:2024.12.01"'), ('libs.compose.material3', '"androidx.compose.material3:material3"'), ('libs.activity.compose', '"androidx.activity:activity-compose:1.9.3"')]:
+for old, new in [('alias(libs.plugins.android.application)', 'id("com.android.application")'), ('alias(libs.plugins.kotlin.android)', 'id("org.jetbrains.kotlin.android")'), ('alias(libs.plugins.kotlin.compose)', 'id("org.jetbrains.kotlin.plugin.compose")'), ('libs.compose.bom', '"androidx.compose:compose-bom:2024.12.01"'), ('libs.compose.material3', '"androidx.compose.material3:material3"'), ('libs.activity.compose', '"androidx.activity:activity-compose:1.9.3"'), ('libs.junit', '"junit:junit:4.13.2"')]:
     s = s.replace(old, new)
 s = s.replace('implementation(project(":bugcapsule-patch-compose"))', '\n'.join(f'implementation("io.github.bugcapsule:{name}:{version}")' for name in ['bugcapsule-android', 'bugcapsule-patch', 'bugcapsule-patch-compose']))
 s += '\nkotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }\n'
