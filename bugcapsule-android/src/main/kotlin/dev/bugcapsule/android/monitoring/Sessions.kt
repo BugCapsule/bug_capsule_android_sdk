@@ -75,6 +75,7 @@ internal class SessionTracker(
 
     private val lock = Any()
     private var current: State? = null
+    private var stopped = false
     private var endTimer: Cancellable? = null
 
     /** True while a session is running (tests). */
@@ -115,6 +116,7 @@ internal class SessionTracker(
     }
 
     fun onForeground() = synchronized(lock) {
+        if (stopped) return@synchronized
         endTimer?.cancel()
         endTimer = null
         val s = current
@@ -150,11 +152,18 @@ internal class SessionTracker(
 
     /** Starts a new session (ending a running one); for apps that manage sessions themselves. */
     fun start() = synchronized(lock) {
+        if (stopped) return@synchronized
         current?.let { endLocked(it, "exited", nowMs()) }
         startLocked(nowMs())
     }
 
     fun end() = synchronized(lock) {
+        current?.let { endLocked(it, "exited", nowMs()) }
+    }
+
+    /** Permanently stops sessions for this monitoring instance, including late foreground callbacks. */
+    fun stop() = synchronized(lock) {
+        stopped = true
         current?.let { endLocked(it, "exited", nowMs()) }
     }
 

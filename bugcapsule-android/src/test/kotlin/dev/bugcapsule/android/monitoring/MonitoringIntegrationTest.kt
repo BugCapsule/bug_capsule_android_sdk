@@ -437,6 +437,27 @@ class MonitoringIntegrationTest {
     }
 
     @Test
+    fun closeDuringStartupMustNotBeDroppedWhenEarlyMonitoringQueueIsFull() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        init(BugCapsuleTestOverrides(tmp.root, beforePrepare = Runnable { gate.await(10, TimeUnit.SECONDS) }))
+        val rt = BugCapsule.session as Runtime
+        rt.onLifecycle("resumed")   // the app is in the foreground while preparation runs
+
+        assertFalse("nothing is known to be sent before preparation", BugCapsule.flush(100))
+        repeat(Runtime.EARLY_EVENTS + 1) { BugCapsule.captureMessage("queued-before-close-$it") }
+        BugCapsule.close(100)       // times out waiting: the stop is applied when preparation finishes
+        gate.countDown()
+        awaitPrepared()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertFalse("monitoring stays off after a close", rt.monitoring?.active ?: false)
+        assertFalse("closed monitoring does not upload retained events", BugCapsule.flush(5_000))
+        assertTrue("already queued events are retained after close", rt.monitoring!!.queuedEnvelopes().isNotEmpty())
+        assertTrue("no session started after the close", items("session").isEmpty())
+        assertFalse("nothing is left for the next launch to call abnormal", java.io.File(tmp.root, "monitoring/session.json").exists())
+    }
+
+    @Test
     fun closeWaitsForStartupPreparationThenStopsMonitoring() {
         val gate = java.util.concurrent.CountDownLatch(1)
         init(BugCapsuleTestOverrides(tmp.root, beforePrepare = Runnable { gate.await(10, TimeUnit.SECONDS) }))

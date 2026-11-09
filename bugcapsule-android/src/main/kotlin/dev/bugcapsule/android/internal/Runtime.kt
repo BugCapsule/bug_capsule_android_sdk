@@ -234,6 +234,8 @@ internal class Runtime(
 
     /** Monitoring calls made while preparing (scope changes, captured errors), in order; guarded by [lock]. */
     private val earlyMonitoring = ArrayList<(Monitoring) -> Unit>()
+    /** A close is a control request and must never be dropped with bounded startup events. Guarded by lock. */
+    private var monitoringClosePending = false
     private val prepared = java.util.concurrent.CountDownLatch(1)
 
     /** The session may still record once prepared: enabled, and not sampled out by the local rate. */
@@ -348,6 +350,20 @@ internal class Runtime(
         }
         val mon = monitoring ?: return
         op(mon)
+    }
+
+    /** Stops monitoring after preparation even when the startup event queue is full. */
+    fun stopMonitoringAfterPreparation() {
+        synchronized(lock) {
+            if (preparing) {
+                monitoringClosePending = true
+                return
+            }
+            monitoring?.let {
+                it.sessions?.stop()
+                it.disable(purge = false)
+            }
+        }
     }
 
     /** Keeps an event recorded during preparation; false once preparation finished. */
@@ -540,6 +556,10 @@ internal class Runtime(
                 }
             }
             earlyMonitoring.clear()
+            if (monitoringClosePending) {
+                ready?.sessions?.stop()
+                ready?.disable(purge = false)
+            }
             while (early.isNotEmpty()) {
                 val e = early.removeFirst()
                 try {

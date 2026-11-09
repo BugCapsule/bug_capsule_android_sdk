@@ -667,7 +667,9 @@ object BugCapsule {
      * Ends the session, flushes and stops monitoring for this process (capsules
      * are unaffected). Right after [init] it first waits (within [timeoutMs]) for
      * startup preparation; if that is still running, the stop is applied as soon
-     * as it finishes, so monitoring never starts after a close.
+     * as it finishes, so monitoring never starts after a close. Once closed, no
+     * session starts again in this process (neither [startSession] nor the app
+     * returning to the foreground); events already queued stay on disk.
      */
     @JvmStatic
     @JvmOverloads
@@ -677,10 +679,7 @@ object BugCapsule {
         if (rt.awaitPrepared(timeoutMs)) {
             rt.monitoring?.close(remainingMs(start, timeoutMs))
         } else {
-            rt.withMonitoring {
-                it.sessions?.end()
-                it.disable(purge = false)
-            }
+            rt.stopMonitoringAfterPreparation()
         }
     }
 
