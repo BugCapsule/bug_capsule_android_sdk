@@ -75,6 +75,7 @@ internal class SessionTracker(
 
     private val lock = Any()
     private var current: State? = null
+    private var stopped = false
     private var endTimer: Cancellable? = null
 
     /** True while a session is running (tests). */
@@ -87,15 +88,17 @@ internal class SessionTracker(
      * and environment it ran with. [crashedAtMs]: the previous process ended
      * with a native crash at that time.
      */
-    fun recoverPrevious(crashedAtMs: Long?) {
+    fun recoverPrevious(crashedAtMs: Long?) = synchronized(lock) {
         val previous = try {
             if (file.exists()) J.obj(Json.parse(file.readText()))?.let { State.fromJson(it, release, environment) } else null
         } catch (_: Exception) {
             null
         }
+        // Defense: the saved file is this process's live session, never a previous one.
+        if (previous != null && previous.sid == current?.sid) return@synchronized
         Files.deleteQuietly(file)
-        previous ?: return
-        if (previous.status != "ok") return
+        previous ?: return@synchronized
+        if (previous.status != "ok") return@synchronized
         when {
             crashedAtMs != null -> {
                 previous.status = "crashed"
@@ -113,6 +116,7 @@ internal class SessionTracker(
     }
 
     fun onForeground() = synchronized(lock) {
+        if (stopped) return@synchronized
         endTimer?.cancel()
         endTimer = null
         val s = current
@@ -148,11 +152,18 @@ internal class SessionTracker(
 
     /** Starts a new session (ending a running one); for apps that manage sessions themselves. */
     fun start() = synchronized(lock) {
+        if (stopped) return@synchronized
         current?.let { endLocked(it, "exited", nowMs()) }
         startLocked(nowMs())
     }
 
     fun end() = synchronized(lock) {
+        current?.let { endLocked(it, "exited", nowMs()) }
+    }
+
+    /** Permanently stops sessions for this monitoring instance, including late foreground callbacks. */
+    fun stop() = synchronized(lock) {
+        stopped = true
         current?.let { endLocked(it, "exited", nowMs()) }
     }
 

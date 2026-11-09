@@ -32,7 +32,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Local evidence builds only: no release keystore in this repository.
             signingConfig = signingConfigs.getByName("debug")
         }
@@ -44,4 +44,5 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
     implementation(libs.activity.compose)
+    testImplementation(libs.junit)
 }

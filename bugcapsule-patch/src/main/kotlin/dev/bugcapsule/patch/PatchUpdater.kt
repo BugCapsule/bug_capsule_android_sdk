@@ -26,7 +26,13 @@ interface PatchTransport {
 
 enum class PatchUpdateState { UP_TO_DATE, RESTART_REQUIRED, NOT_IN_COHORT, QUARANTINED, FAILED }
 
-data class PatchUpdateResult(val state: PatchUpdateState, val artifactDigest: String? = null, val reason: String? = null)
+data class PatchUpdateResult(
+    val state: PatchUpdateState,
+    val artifactDigest: String? = null,
+    val reason: String? = null,
+    /** The server's hint for the next check, in seconds, when it gave one. */
+    val retryAfterSeconds: Long? = null,
+)
 
 /**
  * Check, download, verify, stage. Blocking: call it off the main thread. Never
@@ -51,11 +57,24 @@ class PatchUpdater(private val patch: BugCapsulePatch, private val transport: Pa
     } catch (e: PatchException) {
         PatchUpdateResult(PatchUpdateState.FAILED, reason = e.code)
     } catch (e: PatchHttpException) {
-        PatchUpdateResult(PatchUpdateState.FAILED, reason = e.reason)
+        if (e.reason == "channel_invalidated") invalidated(e) else PatchUpdateResult(PatchUpdateState.FAILED, reason = e.reason, retryAfterSeconds = e.retryAfterSeconds)
     } catch (e: java.io.IOException) {
         PatchUpdateResult(PatchUpdateState.FAILED, reason = "transport: ${e.message}")
     } catch (e: org.json.JSONException) {
         PatchUpdateResult(PatchUpdateState.FAILED, reason = "malformed_response")
+    }
+
+    /** No channel, so nothing is staged or activated; only trust can change, and only through a keyring the pinned roots verify. */
+    private fun invalidated(e: PatchHttpException): PatchUpdateResult {
+        var reason = "channel_invalidated"
+        if (e.keyringDocument != null && e.keyringSignature != null) {
+            try {
+                patch.applyKeyring(e.keyringDocument, e.keyringSignature)
+            } catch (k: PatchException) {
+                reason = "channel_invalidated; keyring_rejected:${k.code}"
+            }
+        }
+        return PatchUpdateResult(PatchUpdateState.FAILED, reason = reason, retryAfterSeconds = e.retryAfterSeconds)
     }
 
     private fun act(d: JSONObject): PatchUpdateResult {
