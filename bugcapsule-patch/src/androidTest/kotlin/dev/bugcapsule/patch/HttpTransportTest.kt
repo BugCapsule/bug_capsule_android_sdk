@@ -94,6 +94,43 @@ class HttpTransportTest {
         }
     }
 
+    // 503 channel_invalidated (P0-3)
+    private fun invalidated(keyring: Any? = JSONObject.NULL, reason: String = "channel_invalidated") =
+        JSONObject().put("type", "urn:bugcapsule:problem:unavailable").put("status", 503).put("code", "unavailable").put("reason", reason).put("keyring", keyring).toString()
+
+    private fun error(block: () -> Unit) = assertThrows(PatchHttpException::class.java) { block() }
+
+    @Test fun invalidatedChannelCarriesKeyringAndRetryAfterButNoChannel() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "30").setHeader("Content-Type", "application/problem+json")
+            .setBody(invalidated(JSONObject().put("version", 3).put("document", b64(7, 8)).put("signature", b64(9)))))
+        val e = error { t.fetchChannel(null) }
+        assertEquals("channel_invalidated", e.reason)
+        assertEquals(503, e.status)
+        assertEquals(30L, e.retryAfterSeconds)
+        assertEquals(listOf<Byte>(7, 8), e.keyringDocument!!.toList())
+        assertEquals(listOf<Byte>(9), e.keyringSignature!!.toList())
+    }
+
+    @Test fun invalidatedWithoutOrWithMalformedKeyringCarriesNothing() {
+        for (k in listOf<Any>(JSONObject.NULL, "nope", JSONObject().put("document", 1).put("signature", "x"), JSONObject().put("document", "%%%").put("signature", "***"))) {
+            server.enqueue(MockResponse().setResponseCode(503).setBody(invalidated(k)))
+            val e = error { t.fetchChannel(null) }
+            assertEquals(k.toString(), "channel_invalidated", e.reason)
+            assertNull(k.toString(), e.keyringDocument)
+        }
+    }
+
+    @Test fun other503sStayHttpErrorAndOversizedBodiesAreRefused() {
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "5").setBody(invalidated(reason = "maintenance")))
+        val e = error { t.fetchChannel(null) }
+        assertEquals("http_error", e.reason)
+        assertEquals(5L, e.retryAfterSeconds)
+        server.enqueue(MockResponse().setResponseCode(503).setBody("<html>"))
+        assertEquals("http_error", reason { t.fetchChannel(null) })
+        server.enqueue(MockResponse().setResponseCode(503).setBody(Buffer().write(ByteArray(HttpPatchTransport.MAX_CHANNEL_BYTES + 1))))
+        assertEquals("response_too_large", reason { t.fetchChannel(null) })
+    }
+
     @Test fun malformedDigestNeverReachesAPath() {
         assertEquals("bad_digest", reason { t.fetchArtifact("../secrets") })
         assertEquals(0, server.requestCount)
