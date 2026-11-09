@@ -759,7 +759,7 @@ internal class Monitoring(private val env: MonitoringEnvironment) : TracingHub {
     fun queuedEnvelopes(): List<File> = outbox?.entries()?.map { it.file } ?: emptyList()
 
     fun close(timeoutMs: Long) {
-        sessions?.end()
+        sessions?.stop()
         flush(timeoutMs)
         disable(purge = false)
         outbox?.close()

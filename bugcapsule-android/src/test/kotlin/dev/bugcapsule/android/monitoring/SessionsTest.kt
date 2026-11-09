@@ -31,6 +31,20 @@ class SessionsTest {
     )
 
     @Test
+    fun stoppedTrackerCannotReopenFromForegroundOrManualStart() {
+        val tracker = patchTracker(patched)
+        tracker.onForeground()
+        tracker.stop()
+        assertEquals(listOf("ok", "exited"), sent.map { it.first["status"] })
+        sent.clear()
+        tracker.onForeground()
+        tracker.start()
+        tracker.stop()
+        assertFalse(tracker.isActive)
+        assertTrue(sent.isEmpty())
+    }
+
+    @Test
     fun recoveryAfterThisProcessStartedItsSessionLeavesTheLiveSessionAlone() {
         // The race seen on an emulator: the app reached the foreground (and the
         // session started and was saved) before startup recovery read the file.
