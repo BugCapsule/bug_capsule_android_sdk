@@ -21,6 +21,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.util.Collections
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class SQLiteSpansTest {
@@ -44,6 +45,9 @@ class SQLiteSpansTest {
             BugCapsuleConfig.builder().mode(CaptureMode.QA).tracesSampleRate(1.0)
                 .beforeSendTransaction { tx -> tx.also { sent.add(it.payload) } }.build(),
         )
+        // Monitoring starts once init's background preparation is done (queued before this);
+        // a transaction started before that is a no-op.
+        BugCapsule.flushUploads().get(10, TimeUnit.SECONDS)
         val helper = BugCapsuleSQLiteOpenHelperFactory(FrameworkSQLiteOpenHelperFactory()).create(
             SupportSQLiteOpenHelper.Configuration.builder(app).name("shop.db").callback(
                 object : SupportSQLiteOpenHelper.Callback(1) {
