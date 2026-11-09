@@ -1,3 +1,9 @@
+# 0.4.1-beta.8 — 2026-11-09
+
+- Recover previous-session crashes before exposing monitoring; wait for preparation during flush and preserve close requests even when the startup queue is full. Closed sessions cannot reopen.
+- Harden signed patch delivery, revoked-key recovery and rollback receipts; embed engine 84e0431 with durable activation failure handling.
+- Verified real SDK crash-triggered server rollback on Android emulator; physical-device durability and performance remain separate gates.
+
 # 0.4.1-beta.7 — 2026-11-03
 
 - Ship signed emergency guards, update providers and the registered patch runtime.
