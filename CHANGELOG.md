@@ -13,6 +13,10 @@
 
 # Changelog
 
+## 0.4.1 — 2026-11-19
+
+- Stable release of the Android SDK based on 0.4.1-beta.8.
+
 ## 0.4.1-beta.7 — 2026-11-01
 
 - Publish `bugcapsule-patch` and `bugcapsule-patch-compose` with signed module execution, registered Compose surfaces, HTTP delivery, health receipts and signed rollback. The runtime AAR includes arm64-v8a, armeabi-v7a and x86_64 JNI libraries. Patches only replace registered logic and surfaces.

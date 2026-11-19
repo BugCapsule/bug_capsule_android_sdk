@@ -61,7 +61,15 @@ class HttpTransportTest {
     }
 
     @Test fun undeclaredOversizeStopsAtTheLimit() {
-        server.enqueue(MockResponse().setChunkedBody(Buffer().write(ByteArray(HttpPatchTransport.MAX_ARTIFACT_BYTES + 1)), 1 shl 20))
+        // The server shares the emulator heap with the client. Reuse backing segments
+        // so this test measures the client reading the full artifact limit.
+        val chunk = Buffer().write(ByteArray(8192))
+        val body = Buffer()
+        val size = HttpPatchTransport.MAX_ARTIFACT_BYTES.toLong() + 1
+        while (body.size < size) {
+            chunk.copyTo(body, 0, minOf(chunk.size, size - body.size))
+        }
+        server.enqueue(MockResponse().setChunkedBody(body, 1 shl 20))
         assertEquals("response_too_large", reason { t.fetchArtifact(digest) })
     }
 
