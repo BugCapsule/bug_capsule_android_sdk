@@ -16,8 +16,8 @@ installs a package by itself.
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1-beta.6")
-    implementation("io.github.bugcapsule:bugcapsule-android-play:0.4.1-beta.6")
+    implementation("io.github.bugcapsule:bugcapsule-android:0.4.1")
+    implementation("io.github.bugcapsule:bugcapsule-android-play:0.4.1")
 }
 ```
 
